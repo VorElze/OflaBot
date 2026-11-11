@@ -21,8 +21,12 @@ const WORK_RULES =
   '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 1×; hasilnya sudah ada di konteks. ' +
   '5) HEMAT LANGKAH: maksimal 5 panggilan baca (file_list/file_stat/browser_text/dll) sebelum kamu WAJIB mengambil aksi nyata. ' +
   'Jangan menjelajahi folder yang tidak berhubungan dengan tugas. Untuk tugas memindahkan file: daftar 1-2 folder sumber, lalu LANGSUNG file_move. ' +
-  '6) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
-  '7) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
+  '6) JANGAN pakai exec untuk melihat daftar file ("dir", "Get-ChildItem", "tree", "ls"); gunakan file_list. exec hanya untuk build/menjalankan aplikasi. ' +
+  '7) JANGAN memindai seluruh disk secara rekursif ("Get-ChildItem -Recurse C:\\", "dir /s"). Periksa folder relevan satu per satu, lalu langsung file_move. ' +
+  '8) JANGAN memindahkan/menghapus file sistem: C:\\Windows, C:\\Program Files, C:\\ProgramData, AppData, Recovery, System Volume Information — itu bisa merusak Windows. ' +
+  'Jika pengguna memintanya, jelaskan risikonya dan minta konfirmasi eksplisit lebih dulu. ' +
+  '9) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
+  '10) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
 
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +

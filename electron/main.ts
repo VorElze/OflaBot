@@ -731,6 +731,19 @@ ipcMain.handle('tool:screenshot', async () => {
   return { dataUrl: sources[0].thumbnail.toDataURL() };
 });
 
+// ---- Proses tool yang sedang berjalan (bisa dihentikan tombol Stop) ----
+const runningToolProcs = new Set<any>();
+
+function killRunningToolProcs() {
+  for (const p of runningToolProcs) {
+    try { spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch { /* ignore */ }
+    try { p.kill(); } catch { /* ignore */ }
+  }
+  runningToolProcs.clear();
+}
+
+ipcMain.handle('tool:kill', async () => { killRunningToolProcs(); return { ok: true }; });
+
 // ---- Run shell command ----
 ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => {
   const timeoutMs = Math.min(Math.max(opts?.timeoutMs ?? 120000, 1000), 600000);
@@ -744,13 +757,17 @@ ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number;
         cwd: opts?.cwd || undefined,
         windowsHide: true,
       });
+      runningToolProcs.add(p);
       let out = '', err = '';
       let truncated = false;
       p.stdout.on('data', (d) => { out += d; if (out.length > MAX_OUT) { out = out.slice(0, MAX_OUT); truncated = true; } });
       p.stderr.on('data', (d) => { err += d; if (err.length > MAX_OUT) { err = err.slice(0, MAX_OUT); truncated = true; } });
-      p.on('error', (e: any) => done({ code: -1, stdout: out, stderr: (err + '\n' + (e?.message || String(e))).trim(), error: e?.message || String(e) }));
-      p.on('close', (code) => done({ code, stdout: out, stderr: err, truncated }));
+      p.on('error', (e: any) => { runningToolProcs.delete(p); done({ code: -1, stdout: out, stderr: (err + '\n' + (e?.message || String(e))).trim(), error: e?.message || String(e) }); });
+      p.on('close', (code) => { runningToolProcs.delete(p); done({ code, stdout: out, stderr: err, truncated }); });
       setTimeout(() => {
+        if (finished) return;
+        runningToolProcs.delete(p);
+        try { spawn('taskkill', ['/pid', String(p.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); } catch { /* ignore */ }
         try { p.kill(); } catch { /* ignore */ }
         done({ code: -1, stdout: out, stderr: err, timedOut: true, note: `Perintah dihentikan setelah ${Math.round(timeoutMs / 1000)}s. Pecah jadi langkah kecil atau pakai tool file_* / file_list.` });
       }, timeoutMs);

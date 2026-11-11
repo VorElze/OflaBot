@@ -81,6 +81,7 @@ interface DshApi {
   skills: DshSkillsApi;
   screenshot: () => Promise<{ dataUrl?: string; error?: string }>;
   exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => Promise<any>;
+  execKill?: () => Promise<any>;
   fs: {
     list: (dir: string, opts?: { pattern?: string; max?: number }) => Promise<any>;
     mkdir: (dir: string) => Promise<any>;

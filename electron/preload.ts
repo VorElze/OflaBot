@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('dsh', {
   // --- desktop tools ---
   screenshot: () => ipcRenderer.invoke('tool:screenshot'),
   exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => ipcRenderer.invoke('tool:exec', cmd, opts),
+  execKill: () => ipcRenderer.invoke('tool:kill'),
   fs: {
     list: (dir: string, opts?: any) => ipcRenderer.invoke('fs:list', dir, opts),
     mkdir: (dir: string) => ipcRenderer.invoke('fs:mkdir', dir),

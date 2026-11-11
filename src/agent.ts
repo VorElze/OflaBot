@@ -140,7 +140,11 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'exec',
-      description: 'Jalankan perintah shell (cmd.exe) di Windows. Mengembalikan stdout/stderr/exit code. timeoutMs default 120000, cwd opsional. Untuk daftar/pindah file gunakan file_list/file_move (lebih aman).',
+      description:
+        'Jalankan perintah shell (cmd.exe) untuk build/menjalankan program. JANGAN dipakai untuk melihat daftar file ' +
+        '("dir", "Get-ChildItem", "tree") atau memindai disk rekursif — pakai file_list (lebih cepat, aman, tanpa error sintaks). ' +
+        'Jangan pindahkan/hapus file di folder sistem (Windows, Program Files, ProgramData, AppData). ' +
+        'Mengembalikan stdout/stderr/exit code. timeoutMs default 120000, cwd opsional.',
       parameters: { type: 'object', properties: { cmd: { type: 'string' }, timeoutMs: { type: 'number' }, cwd: { type: 'string' } }, required: ['cmd'] },
     },
   },

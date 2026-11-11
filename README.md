@@ -233,6 +233,24 @@ Menu sidebar **⚡ Token Saver** — fitur hemat token yang bisa dinyalakan/dima
 | **Compress LLM output** (Caveman) | model menjawab gaya telegrafis, token output hemat |
 | **Lazy senior dev** (Ponytail) | bias solusi minimal: YAGNI, reuse library, hapus > menambah |
 
+## 🚦 Anti putar-putar (v0.2.8)
+
+Dari log sesi nyata: 98× `exec` (76 perintah unik, 22 error sintaks, 0× `file_move`) — bot memeriksa
+terus tanpa pernah mengubah apa pun. Perbaikan:
+
+- **Perintah baca tidak dihitung kemajuan**: `dir`, `Get-ChildItem`, `tree`, `echo`, `whoami`, dst.
+  dihitung sebagai "memeriksa". Kalau 8× tanpa aksi → diingatkan, 11× → peringatan keras,
+  14× → tool dimatikan dan model wajib menyimpulkan.
+- **Dedupe perintah setara**: `dir /b C:\` = `dir C:\ /b` = `cmd /c "dir C:\ /b"` =
+  `powershell -Command Get-ChildItem C:\` → variasi penulisan tidak lagi dieksekusi ulang.
+- **Path sistem dilindungi**: `C:\Windows`, `C:\Program Files`, `C:\ProgramData`, `AppData`,
+  `Recovery`, `System Volume Information` tidak bisa dipindah/dihapus otomatis — muncul alasan jelas.
+- **Tombol Stop benar-benar menghentikan** perintah yang sedang berjalan (kill process tree,
+  tidak menunggu timeout 120 detik).
+- **Indikator langkah**: "Thinking… (langkah 7)" supaya terlihat progresnya.
+- **Aturan prompt baru**: dilarang `exec dir` untuk daftar file, dilarang `Get-ChildItem -Recurse C:\`,
+  wajib pakai `file_list` + `file_move` per folder.
+
 ## Tempel screenshot
 
 Tekan **Ctrl+V** di kotak pesan untuk melampirkan screenshot dari clipboard

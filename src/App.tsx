@@ -278,7 +278,77 @@ const READ_ONLY_TOOLS = new Set([
  * Normalisasi argumen supaya panggilan yang "mirip" terdeteksi sebagai duplikat.
  * Contoh: C:\Foo\ vs c:\foo dan perbedaan "max" dianggap panggilan yang sama.
  */
+/**
+ * Normalisasi perintah shell untuk deteksi duplikat. `dir /b C:\\`,
+ * `dir C:\\ /b`, `cmd /c "dir C:\\ /b"`, dan `powershell -Command Get-ChildItem C:\\`
+ * dianggap panggilan yang sama (model sering "berpindah dialek" untuk hal sama).
+ */
+function canonExecCommand(cmd: string): string {
+  let c = String(cmd || '').toLowerCase().replace(/["']/g, '').replace(/\s+/g, ' ').trim();
+  c = c.replace(/^cmd(\.exe)?\s+(\/c|\/k)\s+/, '');
+  c = c.replace(/^powershell(\.exe)?\s+(-command|-c)\s+/, '');
+  c = c.replace(/\s*2>&1\s*/g, ' ');
+  c = c.replace(/\s*\|\s*(more|findstr[^|]*|select-object[^|]*|sort-object[^|]*|measure-object[^|]*|group-object[^|]*)$/, '');
+  c = c.replace(/[\\]+$/, '').replace(/\s+/g, ' ').trim();
+  const tokens = c.split(' ').filter(Boolean);
+  const verb = tokens[0] || '';
+  // Perintah daftar: urutan opsi tidak penting, jadi samakan dengan sorting token.
+  if (['dir', 'ls', 'get-childitem', 'gci', 'tree'].includes(verb)) tokens.sort();
+  return tokens.join(' ');
+}
+
+/** Perintah shell yang benar-benar mengubah sistem/berkas (bukan sekadar membaca). */
+const MUTATING_VERBS = new Set([
+  'move', 'move-item', 'copy', 'copy-item', 'mkdir', 'md', 'ren', 'rename', 'rename-item',
+  'del', 'erase', 'rmdir', 'rd', 'remove-item', 'xcopy', 'robocopy', 'set-content', 'out-file',
+  'add-content', 'new-item', 'git', 'npm', 'pnpm', 'yarn', 'node', 'python', 'py', 'pip',
+  'dotnet', 'msbuild', 'cargo', 'go', 'curl', 'wget', 'invoke-webrequest', 'invoke-restmethod',
+  'start-process', 'schtasks', 'reg', 'sc', 'net', 'taskkill', 'diskpart', 'format', 'attrib',
+  'icacls', 'takeown', 'mklink', 'tar', '7z', 'expand', 'compact', 'shutdown', 'restart',
+]);
+
+function execVerb(cmd: string): string {
+  const c = canonExecCommand(cmd);
+  return (c.split(' ')[0] || '').replace(/\.exe$/, '');
+}
+
+/** Apakah panggilan ini mengubah sesuatu? Kalau tidak, tidak dihitung sebagai kemajuan. */
+function isMutatingCall(name: string, args: any): boolean {
+  if (['file_move', 'file_write', 'file_mkdir', 'launch', 'mouse', 'type', 'keys'].includes(name)) return true;
+  if (name === 'exec') return MUTATING_VERBS.has(execVerb(args?.cmd || ''));
+  return false;
+}
+
+/** Path sistem yang TIDAK boleh dipindah/dihapus otomatis, walau Full Access. */
+const PROTECTED_ROOTS = [
+  /^[a-z]:\\windows(\\|$)/i,
+  /^[a-z]:\\program files( \(x86\))?(\\|$)/i,
+  /^[a-z]:\\programdata(\\|$)/i,
+  /^[a-z]:\\\$recycle\.bin/i,
+  /^[a-z]:\\system volume information/i,
+  /^[a-z]:\\recovery(\\|$)/i,
+  /\\appdata(\\|$)/i,
+];
+
+function protectionViolation(name: string, args: any): string {
+  const paths: string[] = [];
+  if (name === 'file_move') paths.push(String(args?.src || ''), String(args?.dest || ''));
+  if (name === 'exec') {
+    const cmd = String(args?.cmd || '');
+    if (/\b(move|del|erase|rmdir|rd|xcopy|robocopy|copy|move-item|remove-item|rename-item|new-item)\b/i.test(cmd)) {
+      paths.push(...(cmd.match(/[a-z]:\\[^\s"']*/gi) || []));
+    }
+  }
+  for (const raw of paths) {
+    const p = String(raw || '').replace(/["']/g, '').trim();
+    if (!p) continue;
+    if (PROTECTED_ROOTS.some((r) => r.test(p))) return p;
+  }
+  return '';
+}
+
 function toolSignature(name: string, args: any): string {
+  if (name === 'exec') return 'exec|' + canonExecCommand(args?.cmd || '');
   const norm = (v: any): any => {
     if (Array.isArray(v)) return v.map(norm);
     if (v && typeof v === 'object') {
@@ -458,6 +528,7 @@ export default function App() {
   const [feedbackRating, setFeedbackRating] = useState(0);
   const [compacting, setCompacting] = useState(false);
   const [stepLimitHit, setStepLimitHit] = useState(false);
+  const [liveStep, setLiveStep] = useState(0);
 
   // model dropdown
   const [models, setModels] = useState<string[]>([]);
@@ -878,6 +949,7 @@ export default function App() {
 
   async function agentLoop(sessionId: string, userText: string, agentDef: AgentDef, userContent?: any) {
     setRunning(true);
+    setLiveStep(0);
     abortRef.current = false;
 
     let allowed = toolNamesFor(agentDef.tools);
@@ -930,14 +1002,23 @@ export default function App() {
     // ---- state "engine" (setara DSH/OpenCode) ----
     const toolCache = new Map<string, string>();   // hasil tool baca yang sudah pernah dijalankan
     let exploreStreak = 0;      // panggilan baca berturut-turut tanpa aksi nyata
+    let stallTotal = 0;         // total panggilan non-aksi dalam satu giliran
+    let timeoutStreak = 0;      // perintah yang timeout berturut-turut
     let forceFinal = false;     // paksa model menjawab dari data yang ada
     let taskDone = false;       // model sudah memberi jawaban akhir
     let compactNoticeShown = false;
     let ctx: Msg[] = msgs;      // konteks yang dikirim ke model (bisa diringkas)
     const addMsg = (m: Msg) => { msgs.push(m); if (ctx !== msgs) ctx.push(m); };
 
+    const markProgress = (name: string, args: any) => {
+      if (isMutatingCall(name, args)) { exploreStreak = 0; return; }
+      exploreStreak++;
+      stallTotal++;
+    };
+
     while (!abortRef.current) {
       steps++;
+      setLiveStep(steps);
 
       // Auto-compaction: konteks terlalu panjang -> ringkas riwayat lama.
       const comp = compactContext(ctx);
@@ -1015,11 +1096,11 @@ export default function App() {
 
           if (seen >= 2) {
             blockedRepeats++;
-            exploreStreak++;
-            if (READ_ONLY_TOOLS.has(name) && toolCache.has(sig)) {
+            markProgress(name, args);
+            if (toolCache.has(sig)) {
               pushToolResult({
                 cached: true,
-                note: `Hasil ${name} dengan argumen ini SUDAH didapat sebelumnya. Tidak dijalankan ulang — pakai hasil di bawah.`,
+                note: `Perintah/panggilan ${name} ini SUDAH dijalankan sebelumnya (variasi penulisan dianggap sama). Tidak dijalankan ulang — pakai hasil di bawah.`,
                 result: (toolCache.get(sig) || '').slice(0, 1500),
               });
             } else {
@@ -1027,9 +1108,22 @@ export default function App() {
                 error: 'panggilan berulang',
                 hint:
                   `Panggilan ${name} dengan argumen yang sama sudah dilakukan ${seen}×. JANGAN ulangi. ` +
-                  'Ambil aksi berikutnya (file_move/file_write/exec) atau jawab pengguna dengan hasil yang sudah ada.',
+                  'Ambil aksi berikutnya (file_move/file_write) atau jawab pengguna dengan hasil yang sudah ada.',
               });
             }
+            continue;
+          }
+
+          // Pengaman path sistem: jangan pernah pindahkan/hapus file Windows.
+          const blockedPath = protectionViolation(name, args);
+          if (blockedPath) {
+            pushToolResult({
+              error: 'path sistem dilindungi',
+              path: blockedPath,
+              hint:
+                'File/folder sistem Windows (Windows, Program Files, ProgramData, AppData, Recovery) TIDAK boleh dipindahkan atau dihapus otomatis — bisa merusak Windows. ' +
+                'Lewati path ini. Jika pengguna memang meminta, jelaskan risikonya dan minta konfirmasi manual di luar OflaBot.',
+            });
             continue;
           }
 
@@ -1062,9 +1156,10 @@ export default function App() {
             result = { error: 'tool gagal: ' + (err?.message || String(err)) };
           }
 
-          // Pantau kemajuan: baca terus-menerus tanpa aksi = tanda berputar.
-          if (READ_ONLY_TOOLS.has(name)) exploreStreak++;
-          else exploreStreak = 0;
+          // Pantau kemajuan: perintah baca (dir/Get-ChildItem/echo/dll) BUKAN aksi.
+          markProgress(name, args);
+          if (result?.timedOut) timeoutStreak++;
+          else timeoutStreak = 0;
 
           if (name === 'todo_write') {
             todoSeen = true;
@@ -1079,7 +1174,7 @@ export default function App() {
           // Yang dikirim ke MODEL selalu diringkas terstruktur; UI menyimpan versi penuh.
           const modelStr = compressToolResult(name, clean, fullStr, settings.tokenSaver?.rtk !== false);
           const contentStr = fullStr.slice(0, 6000);
-          if (READ_ONLY_TOOLS.has(name) && !clean.error) toolCache.set(sig, modelStr);
+          if (!clean.error || clean.cached) toolCache.set(sig, modelStr);
 
           addMsg({ role: 'tool', tool_call_id: tc.id, content: modelStr, name });
           appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: contentStr, image: image || undefined });
@@ -1092,17 +1187,22 @@ export default function App() {
         }
 
         // --- Pengaman kemajuan (bukan batas langkah): hanya aktif kalau stuck ---
-        if (!forceFinal && exploreStreak >= 14) {
+        if (!forceFinal && timeoutStreak >= 2) {
+          systemPrompt +=
+            '\n\n[PENGINGAT SISTEM] Dua perintahmu timeout. JANGAN menjalankan pemindaian rekursif ' +
+            '(Get-ChildItem -Recurse, dir /s). Periksa folder satu per satu dengan file_list, lalu ambil aksi.';
+        }
+        if (!forceFinal && (exploreStreak >= 14 || stallTotal >= 30)) {
           forceFinal = true;
           hitLimit = true;
           appendMessage(sessionId, {
             role: 'notice',
-            content: 'OflaBot membaca banyak hal tanpa mengambil aksi, jadi saya minta ia menyimpulkan dari data yang sudah ada.',
+            content: `OflaBot sudah ${stallTotal} kali hanya membaca/memeriksa tanpa mengubah apa pun, jadi saya minta ia berhenti dan menyimpulkan.`,
           });
         } else if (!forceFinal && exploreStreak === 8) {
           systemPrompt +=
             '\n\n[PENGINGAT SISTEM] Kamu sudah membaca banyak data tanpa mengubah apa pun. ' +
-            'STOP membaca. Ambil aksi nyata sekarang (file_move/file_write/file_mkdir/exec) sesuai rencana, ' +
+            'STOP membaca. Ambil aksi nyata sekarang (file_move/file_write/file_mkdir) sesuai rencana, ' +
             'atau jawab pengguna dengan temuan yang ada beserta kendalanya.';
         } else if (!forceFinal && exploreStreak === 11) {
           systemPrompt +=
@@ -1142,6 +1242,7 @@ export default function App() {
     void taskDone;
 
     setRunning(false);
+    setLiveStep(0);
     void refreshMemory();
   }
 
@@ -1418,7 +1519,7 @@ export default function App() {
 
               {running && (
                 <div className="thinking">
-                  <span className="spinner" /> Thinking…
+                  <span className="spinner" /> Thinking…{liveStep > 1 ? ` (langkah ${liveStep})` : ''}
                 </div>
               )}
             </div>
@@ -1545,7 +1646,7 @@ export default function App() {
 
               <div className="composer-actions">
                 <button className="btn primary" onClick={() => void send()} disabled={running}>Send</button>
-                <button className="btn" onClick={() => { abortRef.current = true; }} disabled={!running}>Stop</button>
+                <button className="btn" onClick={() => { abortRef.current = true; void window.dsh.execKill?.(); }} disabled={!running}>Stop</button>
 
                 <button className="btn ghost" onClick={() => active && updateSession(active.id, (s) => ({ ...s, messages: [] }))}>Clear</button>
               </div>
