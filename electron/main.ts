@@ -205,6 +205,24 @@ app.whenReady().then(() => {
           console.log('FEATURES ' + JSON.stringify(feats));
         }
 
+        // Demo menu "+": buka popover untuk verifikasi tampilan.
+        if (process.env.OFLABOT_SMOKE_MENU) {
+          try {
+            const r = await win!.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              out.addBtn = !!document.querySelector('.add-btn');
+              out.buttons = document.querySelectorAll('.composer button').length;
+              const btn = document.querySelector('.add-btn');
+              if (btn) btn.click();
+              await new Promise((res) => setTimeout(res, 500));
+              out.menu = !!document.querySelector('.popmenu');
+              out.items = Array.from(document.querySelectorAll('.popmenu-item')).map((n) => n.innerText.replace(/\\n/g, ' | '));
+              return out;
+            })()`);
+            console.log('MENU_TEST ' + JSON.stringify(r));
+          } catch (e) { console.log('MENU_TEST_ERR ' + e); }
+          await new Promise((r) => setTimeout(r, 800));
+        }
         // Demo: isi sesi contoh (tool calls) untuk memeriksa render gaya DSH.
         if (process.env.OFLABOT_SMOKE_DEMO) {
           await win!.webContents.executeJavaScript(`(() => {
@@ -252,7 +270,7 @@ app.whenReady().then(() => {
           await win!.webContents.executeJavaScript(`(() => {
             const ta = document.querySelector('.composer textarea');
             const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-            setter.call(ta, 'rapikan file di C lalu pindahkan ke D');
+            setter.call(ta, 'tolong rapikan semua file di folder Download lalu pindahkan ke folder D sesuai jenisnya');
             ta.dispatchEvent(new Event('input', { bubbles: true }));
             document.querySelector('.composer-actions .btn.primary').click();
             return true;
@@ -270,6 +288,8 @@ app.whenReady().then(() => {
               loopHints: toolMsgs.filter((m) => String(m.content || '').includes('loop terdeteksi')).length,
               notices,
               lastAssistant: String((assistant[assistant.length - 1] || {}).content || '').slice(0, 160),
+              todoResults: toolMsgs.filter((m) => String(m.content || '').indexOf('todos') >= 0).length,
+              planPanelVisible: !!document.querySelector('.todo-card'),
             };
           })()`);
           console.log('LOOP_TEST ' + JSON.stringify(loopInfo));
@@ -846,8 +866,107 @@ ipcMain.handle('ui:confirm', async (_e, msg: string) => {
 });
 
 // ===========================================================================
-// Info aplikasi + buka tautan (donasi)
+// Dialog pilih file/gambar untuk lampiran chat (menu "+").
 // ===========================================================================
+ipcMain.handle('dialog:pickFiles', async (_e, mode?: string) => {
+  try {
+    const isImageMode = mode === 'image';
+    const filters = isImageMode
+      ? [{ name: 'Gambar', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }]
+      : [
+          { name: 'Semua file', extensions: ['*'] },
+          { name: 'Teks/Kode', extensions: ['txt', 'md', 'json', 'ts', 'tsx', 'js', 'jsx', 'css', 'html', 'py', 'cs', 'ps1', 'bat', 'yml', 'yaml', 'csv', 'log'] },
+          { name: 'Gambar', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] },
+        ];
+    const res = await dialog.showOpenDialog(win!, {
+      title: isImageMode ? 'Pilih gambar' : 'Pilih file',
+      properties: ['openFile', 'multiSelections'],
+      filters,
+    });
+    if (res.canceled || !res.filePaths.length) return { ok: true, files: [] };
+
+    const fsP = await import('fs/promises');
+    const IMG_EXT = /\.(png|jpe?g|webp|gif|bmp)$/i;
+    const files: any[] = [];
+    for (const p of res.filePaths.slice(0, 10)) {
+      try {
+        const st = await fsP.stat(p);
+        const name = path.basename(p);
+        if (IMG_EXT.test(p) && st.size < 8 * 1024 * 1024) {
+          const buf = await fsP.readFile(p);
+          const ext = path.extname(p).slice(1).toLowerCase().replace('jpg', 'jpeg');
+          files.push({ kind: 'image', path: p, name, size: st.size, dataUrl: `data:image/${ext};base64,` + buf.toString('base64') });
+        } else if (st.size < 300 * 1024) {
+          const txt = await fsP.readFile(p, 'utf8');
+          files.push({ kind: 'text', path: p, name, size: st.size, content: txt.slice(0, 120000) });
+        } else {
+          files.push({ kind: 'meta', path: p, name, size: st.size });
+        }
+      } catch (err: any) {
+        files.push({ kind: 'error', path: p, error: err?.message || String(err) });
+      }
+    }
+    return { ok: true, files };
+  } catch (err: any) {
+    return { error: err?.message || String(err), files: [] };
+  }
+});
+
+// ===========================================================================
+// Export sesi (Markdown / JSON / ZIP) + feedback pengguna.
+// ===========================================================================
+ipcMain.handle('session:export', async (_e, payload: { name?: string; content: string; format?: 'md' | 'json' | 'zip' }) => {
+  try {
+    const fmt = payload?.format || 'md';
+    const safeName = (payload?.name || 'oflabot-session').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
+    const res = await dialog.showSaveDialog(win!, {
+      title: 'Simpan sesi',
+      defaultPath: `${safeName}.${fmt}`,
+      filters: fmt === 'json'
+        ? [{ name: 'JSON', extensions: ['json'] }]
+        : fmt === 'zip'
+          ? [{ name: 'ZIP', extensions: ['zip'] }]
+          : [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (res.canceled || !res.filePath) return { ok: true, canceled: true };
+
+    const fsP = await import('fs/promises');
+    if (fmt === 'zip') {
+      const tmpDir = path.join(os.tmpdir(), 'oflabot-export-' + Date.now());
+      await fsP.mkdir(tmpDir, { recursive: true });
+      const mdPath = path.join(tmpDir, `${safeName}.md`);
+      await fsP.writeFile(mdPath, payload.content, 'utf8');
+      await new Promise<void>((resolve, reject) => {
+        const p = spawn('powershell.exe', ['-NoProfile', '-Command',
+          `Compress-Archive -Path '${mdPath}' -DestinationPath '${res.filePath}' -Force`]);
+        p.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Compress-Archive exit ' + code))));
+        p.on('error', reject);
+      });
+      try { await fsP.rm(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    } else {
+      await fsP.writeFile(res.filePath, payload.content, 'utf8');
+    }
+    return { ok: true, path: res.filePath };
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle('feedback:save', async (_e, entry: any) => {
+  try {
+    const fsP = await import('fs/promises');
+    const file = path.join(userDataDir || os.tmpdir(), 'feedback.json');
+    let arr: any[] = [];
+    try { arr = JSON.parse(await fsP.readFile(file, 'utf8')); } catch { arr = []; }
+    if (!Array.isArray(arr)) arr = [];
+    arr.push({ ...entry, at: new Date().toISOString(), appVersion: app.getVersion() });
+    await fsP.writeFile(file, JSON.stringify(arr, null, 2), 'utf8');
+    return { ok: true, total: arr.length, file };
+  } catch (err: any) {
+    return { error: err?.message || String(err) };
+  }
+});
+
 ipcMain.handle('app:info', () => ({
   name: APP_NAME,
   version: app.getVersion(),

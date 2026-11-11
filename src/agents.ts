@@ -12,12 +12,14 @@ export type AgentDef = {
 
 const WORK_RULES =
   'ATURAN KERJA (PENTING): ' +
-  '1) Untuk tugas lebih dari 2 langkah, panggil todo_write DULU dengan rencana langkah, lalu update statusnya setiap selesai satu langkah. ' +
+  '1) Untuk tugas lebih dari 2 langkah, kamu WAJIB membuat daftar langkah sendiri dengan todo_write SEBELUM memanggil tool lain — tanpa perlu diminta pengguna. ' +
+  'Pengguna awam tidak tahu tool; jangan pernah menyuruh pengguna mengetik nama tool. ' +
+  'Buat 3-6 langkah yang mudah dipahami orang awam (mis. "Lihat isi folder", "Kelompokkan per jenis file"), lalu perbarui status (pending/in_progress/completed) setiap langkah selesai. ' +
   '2) Operasi file WAJIB pakai tool native: file_list (daftar/pola), file_stat (baca), file_move (pindah/copy, otomatis buat folder), file_mkdir. ' +
-  'JANGAN pakai shell "dir", "move", "copy", "mkdir" berulang-ulang � itu penyebab loop. ' +
+  'JANGAN pakai shell "dir", "move", "copy", "mkdir" berulang-ulang — itu penyebab loop. ' +
   '3) exec hanya untuk hal yang tidak ada tool-nya; beri timeoutMs dan cwd bila perlu, dan pecah perintah besar menjadi langkah kecil. ' +
-  '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 2�. Kalau gagal, ubah pendekatan atau tanya pengguna. ' +
-  '5) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada).';
+  '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 2×. Kalau gagal, ubah pendekatan atau tanya pengguna. ' +
+  '5) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
 
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +
@@ -57,7 +59,7 @@ export const AGENTS: AgentDef[] = [
   {
     id: 'desktop',
     name: 'Desktop Agent',
-    icon: '🖥',
+    icon: '🖥️',
     description: 'Kontrol PC: aplikasi, file, keyboard/mouse',
     tools: 'desktop',
     system:

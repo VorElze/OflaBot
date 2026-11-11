@@ -5,10 +5,12 @@ import { PROVIDERS, getProvider, isAnthropicLike } from './providers';
 
 type Role = 'user' | 'assistant' | 'tool' | 'system' | 'notice';
 type Msg = { role: Role; content: any; name?: string; tool_call_id?: string; tool_calls?: any[]; image?: string; ts?: number };
-type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number };
-type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean; accessMode: 'normal' | 'full' };
+type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number; goal?: string; planMode?: boolean };
+type Permission = 'read-only' | 'workspace' | 'full';
+type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean; accessMode: 'normal' | 'full'; permission: Permission };
 
 type ActivityItem = { name: string; args?: any; result?: any; image?: string; denied?: boolean };
+type Attachment = { kind: 'image' | 'text' | 'meta'; name: string; path: string; dataUrl?: string; content?: string; size?: number };
 type Block =
   | { kind: 'user'; msg: Msg }
   | { kind: 'assistant'; msg: Msg }
@@ -39,7 +41,7 @@ function readKey(key: string, legacy?: string): string | null {
 }
 
 function loadSettings(): Settings {
-  const fallback: Settings = { provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o', autoLearn: true, accessMode: 'normal' };
+  const fallback: Settings = { provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o', autoLearn: true, accessMode: 'normal', permission: 'workspace' };
   try {
     const raw = readKey(SETTINGS_KEY, LEGACY.settings);
     if (raw) {
@@ -53,6 +55,7 @@ function loadSettings(): Settings {
           model: p.model ?? '',
           autoLearn: p.autoLearn !== false,
           accessMode: p.accessMode === 'full' ? 'full' : 'normal',
+          permission: (p.permission as Permission) || (p.accessMode === 'full' ? 'full' : 'workspace'),
         };
       }
     }
@@ -97,6 +100,26 @@ function safeJson(text: string): any {
     }
   }
   return null;
+}
+
+/**
+ * Deteksi otomatis apakah permintaan pengguna butuh rencana bertahap.
+ * Dipakai agar pengguna awam tidak perlu menyebut "todo_write" sama sekali.
+ */
+function needsPlan(text: string): boolean {
+  const t = (text || '').toLowerCase();
+  if (t.length > 160) return true;
+  const verbs = [
+    'rapikan', 'pindahkan', 'pindahin', 'migrasi', 'backup', 'cadangkan', 'kelompokkan', 'sortir',
+    'bersihkan', 'hapus semua', 'gabung', 'pecah', 'pisahkan', 'rename', 'ubah nama', 'susun ulang',
+    'install', 'pasang', 'setup', 'konfigurasi', 'buatkan', 'buat aplikasi', 'buat website',
+    'cari semua', 'telusuri', 'bandingkan', 'ringkas semua', 'rangkum semua', 'analisa', 'analisis',
+    'otomatis', 'setiap', 'semua file', 'seluruh', 'beberapa langkah', 'langkah demi langkah',
+  ];
+  if (verbs.some((v) => t.includes(v))) return true;
+  // banyak klausa = kemungkinan multi-langkah
+  const clauses = (text.match(/\b(lalu|kemudian|setelah itu|selanjutnya|dan juga|terus)\b/gi) || []).length;
+  return clauses >= 2;
 }
 
 function pretty(v: any, max = 900): string {
@@ -173,6 +196,16 @@ export default function App() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [autoApprove, setAutoApprove] = useState(false);
   const [todos, setTodos] = useState<{ content: string; status: string }[]>([]);
+  const [showPlan, setShowPlan] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuView, setMenuView] = useState<'root' | 'permission' | 'shell'>('root');
+  const [modal, setModal] = useState<null | 'goal' | 'feedback'>(null);
+  const [goalDraft, setGoalDraft] = useState('');
+  const [shellDraft, setShellDraft] = useState('');
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackRating, setFeedbackRating] = useState(0);
+  const [compacting, setCompacting] = useState(false);
   const [stepLimitHit, setStepLimitHit] = useState(false);
 
   // model dropdown
@@ -196,6 +229,7 @@ export default function App() {
   const [urlInput, setUrlInput] = useState('');
 
   const abortRef = useRef(false);
+  const pickFilesRef = useRef<() => Promise<void>>(async () => { /* diisi di bawah */ });
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const browserSlotRef = useRef<HTMLDivElement | null>(null);
   const hostReady = typeof window !== 'undefined' && !!window.dsh;
@@ -302,6 +336,10 @@ export default function App() {
         e.preventDefault();
         setBrowserOpen((v) => !v);
       }
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && (e.key === 'u' || e.key === 'U')) {
+        e.preventDefault();
+        void pickFilesRef.current();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -361,7 +399,7 @@ export default function App() {
     }
   }
 
-  // ---------------- system prompt (agent + memory + skill) ----------------
+  // ---------------- system prompt (agent + memory + skill + goal/plan) ----------------
   async function buildSystemPrompt(def: AgentDef): Promise<string> {
     let extra = '';
     try {
@@ -371,7 +409,127 @@ export default function App() {
       const sk = await window.dsh.skills.context();
       if (sk.enabled?.length) extra += '\n\n=== SKILL TERPASANG (panggil skill_read sebelum dipakai) ===\n' + sk.enabled.map((s: any) => `- ${s.slug} (${s.name}): ${s.description}`).join('\n');
     } catch { /* abaikan */ }
+
+    const cur = sessions.find((s) => s.id === (active?.id || ''));
+    if (cur?.goal) {
+      extra += '\n\n=== GOAL SESI (tujuan jangka panjang) ===\n' + cur.goal +
+        '\nSelalu arahkan pekerjaan menuju goal ini. Jika goal sudah tercapai, nyatakan dengan jelas.';
+    }
+    if (cur?.planMode) {
+      extra += '\n\n=== MODE RENCANA (PLAN) ===\n' +
+        'Kamu HANYA menyusun rencana. JANGAN mengubah apa pun di komputer: jangan panggil exec, file_move, file_write, launch, mouse, type, keys. ' +
+        'Boleh membaca (file_list, file_stat, browser_*, memory_*) dan menulis todo. Akhiri dengan rencana langkah yang bisa disetujui pengguna.';
+    }
     return def.system + extra;
+  }
+
+  // ---------------- menu "+" actions ----------------
+  pickFilesRef.current = () => pickFiles();
+  const permission: Permission = settings.permission || (settings.accessMode === 'full' ? 'full' : 'workspace');
+
+  async function pickFiles(mode?: 'image') {
+    setMenuOpen(false);
+    const res = await window.dsh.files.pick(mode);
+    if (res?.error) { flash('Gagal memilih file: ' + res.error); return; }
+    const files = (res?.files || []).filter((f: any) => f.kind !== 'error');
+    if (!files.length) return;
+    setAttachments((prev) => [...prev, ...files.map((f: any) => ({ kind: f.kind, name: f.name, path: f.path, dataUrl: f.dataUrl, content: f.content, size: f.size }))].slice(0, 10));
+    flash(`${files.length} file dilampirkan.`);
+  }
+
+  async function togglePlanMode() {
+    setMenuOpen(false);
+    if (!active) return;
+    updateSession(active.id, (s) => ({ ...s, planMode: !s.planMode }));
+    flash(active.planMode ? 'Keluar dari mode rencana.' : 'Mode rencana aktif — OflaBot hanya menyusun rencana, tidak mengubah apa pun.');
+  }
+
+  function saveGoal() {
+    if (!active) return;
+    updateSession(active.id, (s) => ({ ...s, goal: goalDraft.trim() || undefined }));
+    setModal(null);
+    flash(goalDraft.trim() ? 'Goal sesi disimpan.' : 'Goal dihapus.');
+  }
+
+  async function setPermission(p: Permission) {
+    setMenuOpen(false);
+    setSettings((s) => ({ ...s, permission: p, accessMode: p === 'full' ? 'full' : 'normal' }));
+    setAutoApprove(p === 'full');
+    flash(
+      p === 'read-only' ? 'Permission: Read Only — OflaBot tidak boleh mengubah apa pun.'
+        : p === 'workspace' ? 'Permission: Workspace Write — boleh mengubah file, tetap minta konfirmasi.'
+          : 'Permission: Full access — tanpa konfirmasi.',
+    );
+  }
+
+  async function saveFeedback() {
+    await window.dsh.feedback({ rating: feedbackRating, text: feedbackText.trim(), session: active?.title || '' });
+    setModal(null);
+    setFeedbackText('');
+    setFeedbackRating(0);
+    flash('Terima kasih! Feedback tersimpan.');
+  }
+
+  function sessionTranscript(): string {
+    const s = active;
+    if (!s) return '';
+    const lines: string[] = [`# ${s.title}`, '', `- Agent: ${getAgent(s.agentId).name}`, `- Model: ${settings.model}`, `- Provider: ${prov.name}`, `- Waktu: ${new Date().toISOString()}`, ''];
+    if (s.goal) lines.push(`**Goal:** ${s.goal}`, '');
+    for (const m of s.messages) {
+      if (m.role === 'notice') { lines.push(`> ${String(m.content)}`, ''); continue; }
+      if (m.role === 'tool') { lines.push('<details><summary>tool · ' + (m.name || '') + '</summary>', '', '```', typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2), '```', '', '</details>', ''); continue; }
+      const body = typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2);
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        lines.push(`**${m.role.toUpperCase()}**`, '', body, '', 'Tool: ' + m.tool_calls.map((t: any) => t.function?.name).join(', '), '');
+      } else {
+        lines.push(`**${m.role.toUpperCase()}**`, '', body, '');
+      }
+    }
+    return lines.join('\n');
+  }
+
+  async function exportSession() {
+    if (!active) return;
+    const res = await window.dsh.sessionExport({ name: active.title, content: sessionTranscript(), format: 'md' });
+    if (res?.ok && !res.canceled) flash('Sesi disimpan: ' + res.path);
+    else if (res?.error) flash('Gagal menyimpan: ' + res.error);
+  }
+
+  async function runShellCommand() {
+    const cmd = shellDraft.trim();
+    if (!cmd) return;
+    setMenuOpen(false);
+    setShellDraft('');
+    if (!active) return;
+    const id = active.id;
+    appendMessage(id, { role: 'notice', content: `Shell: ${cmd}` });
+    const r = await window.dsh.exec(cmd, { timeoutMs: 120000 });
+    const out = [r?.stdout, r?.stderr].filter(Boolean).join('\n').trim() || '(tanpa output)';
+    appendMessage(id, { role: 'tool', name: 'exec', tool_call_id: 'shell-' + Date.now(), content: `kode: ${r?.code}\n${out.slice(0, 4000)}` });
+  }
+
+  async function compactHistory() {
+    if (!active || compacting) return;
+    setMenuOpen(false);
+    const msgs = active.messages.filter((m) => m.role === 'user' || m.role === 'assistant');
+    if (msgs.length < 6) { flash('Riwayat masih pendek, belum perlu diringkas.'); return; }
+    setCompacting(true);
+    try {
+      const old = msgs.slice(0, -4);
+      const keep = msgs.slice(-4);
+      const transcript = old.map((m) => `${m.role.toUpperCase()}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`).join('\n').slice(0, 24000);
+      const resp = await window.dsh.chat({
+        provider: isAnthropic ? 'anthropic' : 'openai',
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        messages: [{ role: 'user', content: 'Ringkas percakapan berikut menjadi catatan padat (poin keputusan, hasil, dan konteks penting). Balas ringkasan saja:\n\n' + transcript }],
+      });
+      if (resp?.error || !resp?.text) { flash('Gagal meringkas: ' + JSON.stringify(resp?.error || 'kosong').slice(0, 160)); return; }
+      const summary: Msg = { role: 'assistant', content: '📦 Ringkasan percakapan sebelumnya:\n' + resp.text.trim() };
+      updateSession(active.id, (s) => ({ ...s, messages: [summary, ...keep] }));
+      flash('Riwayat lama diringkas.');
+    } finally { setCompacting(false); }
   }
 
   // ---------------- chat loop ----------------
@@ -385,22 +543,39 @@ export default function App() {
       });
   }, []);
 
-  async function agentLoop(sessionId: string, userText: string, agentDef: AgentDef) {
+  async function agentLoop(sessionId: string, userText: string, agentDef: AgentDef, userContent?: any) {
     setRunning(true);
     abortRef.current = false;
 
-    const allowed = toolNamesFor(agentDef.tools);
+    let allowed = toolNamesFor(agentDef.tools);
+    if (sessions.find((s) => s.id === sessionId)?.planMode) {
+      const SAFE = ['file_list', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read'];
+      allowed = allowed.filter((n) => SAFE.includes(n));
+    }
     const tools = TOOLS.filter((t: any) => allowed.includes(t.function.name));
     const allowedNames = tools.map((t: any) => t.function.name);
-    const systemPrompt = await buildSystemPrompt(agentDef);
+    let systemPrompt = await buildSystemPrompt(agentDef);
 
-    const msgs: Msg[] = [...(sessions.find((s) => s.id === sessionId)?.messages ?? []), { role: 'user', content: userText }];
-    appendMessage(sessionId, { role: 'user', content: userText, ts: Date.now() });
+    // Deteksi otomatis tugas multi-langkah (tanpa perlu pengguna menyebut nama tool).
+    const isMultiStep = needsPlan(userText);
+    if (isMultiStep && allowedNames.includes('todo_write')) {
+      systemPrompt +=
+        '\n\n[INSTRUKSI INTERNAL — jangan tampilkan ke pengguna] ' +
+        'Permintaan ini multi-langkah. Sebelum tool lain, panggil todo_write dengan rencana 3-6 langkah ' +
+        'berbahasa awam, lalu jalankan dan perbarui statusnya. Pengguna tidak menyuruh ini; lakukan otomatis.';
+    }
+    setShowPlan(isMultiStep);
+
+    const msgs: Msg[] = [...(sessions.find((s) => s.id === sessionId)?.messages ?? []), { role: 'user', content: userContent ?? userText }];
+    appendMessage(sessionId, { role: 'user', content: userContent ? (userText || '[lampiran]') : userText, ts: Date.now() });
+    if (isMultiStep) setTodos([]);
 
     let steps = 0;
     const sigCounts = new Map<string, number>();
     let hitLimit = false;
     let lastError = '';
+    let planNudges = 0;
+    let todoSeen = false;
 
     const callModel = async (payload: any) => {
       // Retry untuk error transien (rate limit / 5xx / jaringan).
@@ -420,6 +595,14 @@ export default function App() {
 
     while (steps < 26 && !abortRef.current) {
       steps++;
+
+      // Pengingat otomatis (tanpa terlihat pengguna): kalau rencana belum dibuat.
+      if (isMultiStep && !todoSeen && planNudges < 3 && steps >= 2) {
+        planNudges++;
+        systemPrompt +=
+          '\n\n[PENGINGAT SISTEM] Kamu belum membuat daftar langkah untuk tugas ini. ' +
+          'Panggil todo_write SEKARANG (3-6 langkah sederhana) sebelum memanggil tool lain.';
+      }
       const payload = {
         provider: isAnthropic ? 'anthropic' : 'openai',
         baseUrl: settings.baseUrl,
@@ -473,7 +656,11 @@ export default function App() {
             continue;
           }
 
-          const fullAccess = settings.accessMode === 'full' || autoApprove;
+          if (permission === 'read-only' && isDangerous(name, args)) {
+            pushToolResult({ error: 'Mode Read Only aktif', hint: 'Aksi mengubah/menjalankan diblokir. Minta pengguna mengganti Permission ke Workspace Write atau Full access.' });
+            continue;
+          }
+          const fullAccess = permission === 'full' || autoApprove;
           if (isDangerous(name, args) && !fullAccess) {
             const ok = await window.dsh.confirm(
               `Izinkan aksi "${name}"?\n${JSON.stringify(args).slice(0, 300)}\n\n` +
@@ -497,6 +684,7 @@ export default function App() {
           }
 
           if (name === 'todo_write') {
+            todoSeen = true;
             const list = Array.isArray(result?.todos) ? result.todos : Array.isArray(args.todos) ? args.todos : [];
             setTodos(list);
           }
@@ -575,17 +763,36 @@ export default function App() {
 
   async function send() {
     const text = input.trim();
-    if (!text || running || !active) return;
+    if ((!text && attachments.length === 0) || running || !active) return;
     if (!hostReady) return;
     const p = getProvider(settings.provider);
     if (!settings.apiKey && !p.noKey) { setPanel('settings'); flash('Isi API Key dulu.'); return; }
     if (!settings.model) { setPanel('settings'); flash('Pilih model AI dulu.'); return; }
 
+    // Lampiran: gambar -> vision, file teks -> konteks tambahan.
+    const images = attachments.filter((a) => a.kind === 'image' && a.dataUrl);
+    const textFiles = attachments.filter((a) => a.kind === 'text' && a.content);
+    let userContent: any = text;
+    if (images.length) {
+      const parts: any[] = [];
+      if (text) parts.push({ type: 'text', text });
+      for (const img of images) parts.push({ type: 'image_url', image_url: { url: img.dataUrl } });
+      userContent = parts;
+    }
+    let promptText = text;
+    if (textFiles.length) {
+      promptText += '\n\n' + textFiles
+        .map((f) => `--- LAMPIRAN: ${f.name} (${f.path}) ---\n${(f.content || '').slice(0, 60000)}`)
+        .join('\n\n');
+    }
+    if (!text && images.length) promptText = promptText || '(lihat gambar yang dilampirkan)';
+
     setInput('');
+    setAttachments([]);
     setStepLimitHit(false);
-    updateSession(active.id, (s) => ({ ...s, title: s.messages.length === 0 ? sessionTitle(text) : s.title }));
+    updateSession(active.id, (s) => ({ ...s, title: s.messages.length === 0 ? sessionTitle(promptText || 'Lampiran') : s.title }));
     const snapshot = active;
-    await agentLoop(snapshot.id, text, getAgent(snapshot.agentId));
+    await agentLoop(snapshot.id, promptText, getAgent(snapshot.agentId), userContent);
     try {
       const fresh = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]') as Session[];
       const s2 = fresh.find((x) => x.id === snapshot.id);
@@ -711,16 +918,15 @@ export default function App() {
               onClick={() => setBrowserOpen((v) => !v)}>🌐</button>
           </div>
           <div className="topbar-info">
+
             <button
-              className={`pill access ${settings.accessMode === 'full' || autoApprove ? 'full' : ''}`}
-              title="Klik untuk mengubah mode akses (Normal / Full Access)"
-              onClick={() => {
-                if (settings.accessMode === 'full') { setSettings((s) => ({ ...s, accessMode: 'normal' })); setAutoApprove(false); flash('Mode Normal: aksi berbahaya minta konfirmasi.'); }
-                else { setSettings((s) => ({ ...s, accessMode: 'full' })); flash('Full Access: semua aksi dijalankan tanpa konfirmasi.'); }
-              }}
+              className="pill perm"
+              title="Permission (klik untuk ganti)"
+              onClick={() => void setPermission(permission === 'read-only' ? 'workspace' : permission === 'workspace' ? 'full' : 'read-only')}
             >
-              {settings.accessMode === 'full' || autoApprove ? '🔓 Full Access' : '🔒 Normal'}
+              🛡 {permission === 'read-only' ? 'Read Only' : permission === 'workspace' ? 'Workspace' : 'Full'}
             </button>
+            {active?.planMode && <span className="pill plan">🗒 Plan</span>}
             <span className="pill">{agent.icon} {agent.name}</span>
             <span className="pill muted">{settings.model || 'pilih model'}</span>
             <span className="pill muted">{prov.name}</span>
@@ -731,14 +937,25 @@ export default function App() {
         <div className="body">
           <section className="chat-col">
             <div className="chat" ref={scrollRef}>
-              {todos.length > 0 && (
+              {active?.goal && (
+                <div className="goal-banner">
+                  <span className="goal-icon">🎯</span>
+                  <span className="goal-text"><b>Goal:</b> {active.goal}</span>
+                  <button className="link" onClick={() => { setGoalDraft(active.goal || ''); setModal('goal'); }}>ubah</button>
+                </div>
+              )}
+              {active?.planMode && (
+                <div className="plan-banner">🗒 Mode rencana: OflaBot hanya menyusun rencana, tidak mengubah apa pun. <button className="link" onClick={() => void togglePlanMode()}>keluar</button></div>
+              )}
+              {(todos.length > 0 || (showPlan && running)) && (
                 <div className="todo-card">
                   <div className="todo-head">
-                    <span>📋 Rencana Tugas</span>
+                    <span>📋 Langkah kerja</span>
                     <span className="muted">
-                      {todos.filter((t) => t.status === 'completed').length}/{todos.length}
+                      {todos.length ? `${todos.filter((t) => t.status === 'completed').length}/${todos.length}` : 'menyusun…'}
                     </span>
                   </div>
+                  {todos.length === 0 && <div className="todo-item"><span className="todo-mark">◐</span><span>Menyusun rencana langkah…</span></div>}
                   {todos.map((t, i) => (
                     <div key={i} className={`todo-item ${t.status}`}>
                       <span className="todo-mark">
@@ -790,12 +1007,119 @@ export default function App() {
             </div>
 
             <div className="composer">
-              <textarea
-                value={input}
-                placeholder={`Perintah untuk ${agent.name}… (Enter kirim, Shift+Enter baris baru)`}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
-              />
+              {attachments.length > 0 && (
+                <div className="attach-row">
+                  {attachments.map((a, i) => (
+                    <span key={i} className={`attach-chip ${a.kind}`} title={a.path}>
+                      {a.kind === 'image' ? '🖼' : a.kind === 'text' ? '📄' : '📎'} {a.name}
+                      <button className="attach-x" onClick={() => setAttachments((prev) => prev.filter((_, k) => k !== i))}>×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="composer-main">
+                <div className="attach-wrap">
+                  <button
+                    className={`btn icon add-btn ${menuOpen ? 'on' : ''}`}
+                    title="Tambah (File, Goal, Plan, Permission, Model, Export)"
+                    onClick={() => { setMenuOpen((v) => !v); setMenuView('root'); }}
+                  >
+                    ＋
+                  </button>
+
+                  {menuOpen && (
+                    <div className="popmenu" onMouseLeave={() => setMenuView('root')}>
+                      {menuView === 'root' ? (
+                        <>
+                          <div className="popmenu-label">Add</div>
+                          <button className="popmenu-item" onClick={() => void pickFiles()}>
+                            <span className="pi-icon">📎</span><span className="pi-text">File</span>
+                            <span className="pi-hint">lampirkan gambar / file</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); setGoalDraft(active?.goal || ''); setModal('goal'); }}>
+                            <span className="pi-icon">🎯</span><span className="pi-text">Goal</span>
+                            <span className="pi-hint">tujuan tugas panjang</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => void togglePlanMode()}>
+                            <span className="pi-icon">🗒</span><span className="pi-text">Plan</span>
+                            <span className="pi-hint">{active?.planMode ? 'keluar dari mode rencana' : 'mode rencana saja'}</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); setModal('feedback'); }}>
+                            <span className="pi-icon">💬</span><span className="pi-text">Feedback</span>
+                            <span className="pi-hint">catat masukan sesi ini</span>
+                          </button>
+
+                          <div className="popmenu-label">Commands</div>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); void compactHistory(); }} disabled={running}>
+                            <span className="pi-icon">◐</span><span className="pi-text">Compact</span>
+                            <span className="pi-hint">ringkas riwayat lama</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => setMenuView('permission')}>
+                            <span className="pi-icon">🛡</span><span className="pi-text">Permission</span>
+                            <span className="pi-hint">{permission === 'read-only' ? 'Read Only' : permission === 'workspace' ? 'Workspace Write' : 'Full access'}</span>
+                            <span className="pi-chev">›</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); setPanel('settings'); }}>
+                            <span className="pi-icon">🧠</span><span className="pi-text">Model</span>
+                            <span className="pi-hint">{settings.model || 'pilih model'}</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); void exportSession(); }}>
+                            <span className="pi-icon">⬇</span><span className="pi-text">Export</span>
+                            <span className="pi-hint">simpan log sesi</span>
+                          </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); setMenuView('shell'); }}>
+                            <span className="pi-icon">▸</span><span className="pi-text">Shell command</span>
+                            <span className="pi-hint">jalankan perintah ( ! )</span>
+                          </button>
+                        </>
+                      ) : menuView === 'permission' ? (
+                        <>
+                          <button className="popmenu-item" onClick={() => setMenuView('root')}>
+                            <span className="pi-icon">‹</span><span className="pi-text">Permission</span>
+                          </button>
+                          {([
+                            ['read-only', 'Read Only', 'hanya membaca, tanpa ubah apa pun'],
+                            ['workspace', 'Workspace Write', 'boleh ubah file, tetap konfirmasi'],
+                            ['full', 'Full access', 'tanpa konfirmasi'],
+                          ] as const).map(([val, label, hint]) => (
+                            <button key={val} className={`popmenu-item ${permission === val ? 'selected' : ''}`} onClick={() => void setPermission(val)}>
+                              <span className="pi-icon">🛡</span><span className="pi-text">{label}</span>
+                              <span className="pi-hint">{hint}</span>
+                              {permission === val && <span className="pi-check">✓</span>}
+                            </button>
+                          ))}
+                        </>
+                      ) : (
+                        <>
+                          <button className="popmenu-item" onClick={() => setMenuView('root')}>
+                            <span className="pi-icon">‹</span><span className="pi-text">Shell command</span>
+                          </button>
+                          <div className="popmenu-label">Jalankan perintah tanpa AI</div>
+                          <div className="popmenu-input">
+                            <input
+                              autoFocus
+                              value={shellDraft}
+                              placeholder="mis. dir C:\\Users"
+                              onChange={(e) => setShellDraft(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') void runShellCommand(); }}
+                            />
+                            <button className="btn primary" onClick={() => void runShellCommand()}>Jalankan</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <textarea
+                  value={input}
+                  placeholder={`Perintah untuk ${agent.name}… (Enter kirim, Shift+Enter baris baru, ! perintah shell)`}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
+                />
+              </div>
+
               <div className="composer-actions">
                 <button className="btn primary" onClick={() => void send()} disabled={running}>Send</button>
                 <button className="btn" onClick={() => { abortRef.current = true; }} disabled={!running}>Stop</button>
@@ -848,6 +1172,68 @@ export default function App() {
       </main>
 
       {notice && <div className="toast">{notice}</div>}
+
+      {/* ============ MODAL: Goal / Feedback ============ */}
+      {modal && (
+        <div className="modal-backdrop" onClick={() => setModal(null)}>
+          <div className="modal narrow" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{modal === 'goal' ? '🎯 Goal sesi' : '💬 Feedback'}</h3>
+              <button className="btn icon" onClick={() => setModal(null)}>✕</button>
+            </div>
+            <div className="modal-body">
+              {modal === 'goal' ? (
+                <div className="form">
+                  <div className="hint">
+                    Goal adalah tujuan jangka panjang untuk sesi ini. OflaBot akan terus mengingatnya dan mengarahkan
+                    setiap langkah ke sana. Kosongkan untuk menghapus.
+                  </div>
+                  <label>Tujuan
+                    <textarea
+                      className="goal-input"
+                      value={goalDraft}
+                      onChange={(e) => setGoalDraft(e.target.value)}
+                      placeholder="mis. Merapikan seluruh file kerja ke D:\Rapi dan memastikan tidak ada duplikat"
+                      rows={4}
+                    />
+                  </label>
+                  <div className="row-gap end">
+                    <button className="btn ghost" onClick={() => setModal(null)}>Batal</button>
+                    <button className="btn primary" onClick={saveGoal}>Simpan</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="form">
+                  <div className="hint">Masukan Anda membantu perbaikan OflaBot. Tersimpan lokal di profil aplikasi.</div>
+                  <div className="rating-row">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        className={`rating ${feedbackRating >= n ? 'on' : ''}`}
+                        onClick={() => setFeedbackRating(n)}
+                        title={`${n} bintang`}
+                      >★</button>
+                    ))}
+                  </div>
+                  <label>Catatan
+                    <textarea
+                      className="goal-input"
+                      value={feedbackText}
+                      onChange={(e) => setFeedbackText(e.target.value)}
+                      placeholder="Apa yang kurang / apa yang bagus?"
+                      rows={4}
+                    />
+                  </label>
+                  <div className="row-gap end">
+                    <button className="btn ghost" onClick={() => setModal(null)}>Batal</button>
+                    <button className="btn primary" onClick={() => void saveFeedback()} disabled={!feedbackRating && !feedbackText.trim()}>Kirim</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============ PANELS ============ */}
       {panel && (

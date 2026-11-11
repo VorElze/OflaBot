@@ -9,8 +9,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OflaBot")]
 [assembly: AssemblyCompany("OflaBot")]
 [assembly: AssemblyDescription("OflaBot launcher")]
-[assembly: AssemblyVersion("0.2.3.0")]
-[assembly: AssemblyFileVersion("0.2.3.0")]
+[assembly: AssemblyVersion("0.2.5.0")]
+[assembly: AssemblyFileVersion("0.2.5.0")]
 
 // Launcher tipis: menjalankan OflaBot-core.exe (Electron) dengan argumen wajib
 // sehingga user bisa double-click OflaBot.exe langsung tanpa .bat / flag manual.
@@ -36,11 +36,22 @@ static class Launcher
         }
 
         bool hasNoSandbox = false;
-        foreach (string a in args) if (a == "--no-sandbox") hasNoSandbox = true;
+        bool hasUserData = false;
+        foreach (string a in args)
+        {
+            if (a == "--no-sandbox") hasNoSandbox = true;
+            if (a.StartsWith("--user-data-dir")) hasUserData = true;
+        }
+
+        // Folder profil selalu di dalam folder aplikasi: dijamin bisa ditulis,
+        // sehingga aplikasi tetap start walau %APPDATA% dibatasi/di-redirect.
+        string userDataDir = Path.Combine(dir, "userdata");
+        try { Directory.CreateDirectory(userDataDir); } catch { }
 
         var sb = new StringBuilder();
         foreach (string a in args) sb.Append(Quote(a)).Append(' ');
-        if (!hasNoSandbox) sb.Append("--no-sandbox");
+        if (!hasNoSandbox) sb.Append("--no-sandbox ");
+        if (!hasUserData) sb.Append("--user-data-dir=").Append(Quote(userDataDir));
 
         var psi = new ProcessStartInfo(core, sb.ToString());
         psi.WorkingDirectory = dir;

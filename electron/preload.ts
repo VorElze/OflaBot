@@ -6,6 +6,15 @@ contextBridge.exposeInMainWorld('dsh', {
   // --- chat / provider ---
   chat: (payload: any) => ipcRenderer.invoke('chat:send', payload),
 
+  // --- export & feedback ---
+  sessionExport: (payload: any) => ipcRenderer.invoke('session:export', payload),
+  feedback: (entry: any) => ipcRenderer.invoke('feedback:save', entry),
+
+  // --- lampiran (menu +) ---
+  files: {
+    pick: (mode?: string) => ipcRenderer.invoke('dialog:pickFiles', mode),
+  },
+
   // --- info & tautan ---
   appInfo: () => ipcRenderer.invoke('app:info'),
   openExternal: (url: string) => ipcRenderer.invoke('ui:openExternal', url),
