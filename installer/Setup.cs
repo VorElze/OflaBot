@@ -5,7 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
-using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -14,24 +14,38 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("OflaBot")]
 [assembly: AssemblyCompany("OflaBot")]
 [assembly: AssemblyDescription("Installer OflaBot")]
-[assembly: AssemblyVersion("0.2.1.0")]
-[assembly: AssemblyFileVersion("0.2.1.0")]
+[assembly: AssemblyVersion("0.2.2.0")]
+[assembly: AssemblyFileVersion("0.2.2.0")]
 
-// OflaBot - installer (single-file, payload ter-embed)
-// Dipakai karena NSIS tidak berjalan baik di build Windows ini.
+// OflaBot - installer (single-file, payload ter-embed).
+// Fitur: pilih folder instalasi, shortcut Desktop + Start Menu (dengan fallback
+// PowerShell), uninstaller lengkap (folder + cache + registry + shortcut).
 static class Setup
 {
     const string AppName = "OflaBot";
-    const string AppExe = "OflaBot.exe";
+    const string AppExe = "OflaBot.exe";          // launcher (aman SmartScreen)
+    const string CoreExe = "OflaBot-core.exe";    // binary Electron
     const string Publisher = "OflaBot";
-    const string Version = "0.2.1";
+    const string Version = "0.2.2";
     const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\OflaBot";
-    // Chromium di build Windows ini gagal start (crash 0x80000003) tanpa switch ini.
     const string AppArgs = "--no-sandbox";
 
-    static string InstallDir
+    static string DefaultInstallDir
     {
         get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", AppName); }
+    }
+
+    static string ActiveLog = Path.Combine(Path.GetTempPath(), "oflabot-install.log");
+    static string ScriptDir = Path.GetTempPath();
+
+    static string LogPath(string dir)
+    {
+        try { return Path.Combine(dir, "install-log.txt"); } catch { return Path.Combine(Path.GetTempPath(), "oflabot-install.log"); }
+    }
+
+    static void Log(string file, string text)
+    {
+        try { File.AppendAllText(file, "[" + DateTime.Now.ToString("HH:mm:ss") + "] " + text + Environment.NewLine); } catch { }
     }
 
     [STAThread]
@@ -42,7 +56,7 @@ static class Setup
 
         if (uninstall) { Uninstall(silent); return; }
 
-        string target = InstallDir;
+        string target = DefaultInstallDir;
         foreach (string a in args)
         {
             if (a.StartsWith("/D=")) target = a.Substring(3).Trim('"');
@@ -52,7 +66,11 @@ static class Setup
         if (silent)
         {
             try { RunInstall(target, null); Environment.Exit(0); }
-            catch (Exception ex) { Console.Error.WriteLine(ex); Environment.Exit(1); }
+            catch (Exception ex)
+            {
+                try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "oflabot-install-error.log"), ex.ToString()); } catch { }
+                Environment.Exit(1);
+            }
         }
         else RunGui(target);
     }
@@ -69,7 +87,7 @@ static class Setup
         Application.EnableVisualStyles();
         var form = new Form();
         form.Text = AppName + " - Instalasi";
-        form.ClientSize = new Size(560, 220);
+        form.ClientSize = new Size(600, 300);
         form.FormBorderStyle = FormBorderStyle.FixedDialog;
         form.StartPosition = FormStartPosition.CenterScreen;
         form.MaximizeBox = false;
@@ -78,36 +96,87 @@ static class Setup
         form.ForeColor = Color.White;
 
         var title = new Label();
-        title.Text = "OflaBot " + Version;
+        title.Text = AppName + " " + Version;
         title.Font = new Font("Segoe UI", 14F, FontStyle.Bold);
         title.ForeColor = Color.White;
-        title.SetBounds(22, 18, 500, 30);
+        title.SetBounds(22, 16, 540, 30);
+
+        var lblFolder = new Label();
+        lblFolder.Text = "Folder instalasi";
+        lblFolder.Font = new Font("Segoe UI", 9F);
+        lblFolder.ForeColor = Color.FromArgb(160, 168, 180);
+        lblFolder.SetBounds(24, 56, 200, 18);
+
+        var txtFolder = new TextBox();
+        txtFolder.Text = target;
+        txtFolder.SetBounds(24, 76, 440, 26);
+        txtFolder.BackColor = Color.FromArgb(16, 18, 24);
+        txtFolder.ForeColor = Color.White;
+        txtFolder.BorderStyle = BorderStyle.FixedSingle;
+
+        var btnPick = new Button();
+        btnPick.Text = "Pilih…";
+        btnPick.SetBounds(472, 75, 100, 28);
+        btnPick.BackColor = Color.FromArgb(40, 44, 56);
+        btnPick.ForeColor = Color.White;
+        btnPick.FlatStyle = FlatStyle.Flat;
+        btnPick.Click += delegate
+        {
+            using (var dlg = new FolderBrowserDialog())
+            {
+                dlg.Description = "Pilih folder untuk memasang " + AppName;
+                try { if (Directory.Exists(txtFolder.Text)) dlg.SelectedPath = txtFolder.Text; } catch { }
+                if (dlg.ShowDialog(form) == DialogResult.OK && !string.IsNullOrEmpty(dlg.SelectedPath))
+                {
+                    txtFolder.Text = Path.Combine(dlg.SelectedPath, AppName);
+                }
+            }
+        };
 
         var status = new Label();
-        status.Text = "Siap memasang ke:\n" + target;
+        status.Text = "Klik Pasang untuk mulai.";
         status.Font = new Font("Segoe UI", 9F);
         status.ForeColor = Color.FromArgb(200, 205, 215);
-        status.SetBounds(24, 56, 510, 44);
+        status.SetBounds(24, 116, 548, 40);
 
         var bar = new ProgressBar();
-        bar.SetBounds(24, 110, 512, 18);
+        bar.SetBounds(24, 162, 548, 16);
         bar.Style = ProgressBarStyle.Continuous;
 
         var btn = new Button();
         btn.Text = "Pasang";
-        btn.SetBounds(430, 150, 106, 34);
+        btn.SetBounds(466, 200, 106, 34);
         btn.BackColor = Color.FromArgb(43, 92, 255);
         btn.ForeColor = Color.White;
         btn.FlatStyle = FlatStyle.Flat;
+
+        var btnCancel = new Button();
+        btnCancel.Text = "Batal";
+        btnCancel.SetBounds(352, 200, 106, 34);
+        btnCancel.BackColor = Color.FromArgb(40, 44, 56);
+        btnCancel.ForeColor = Color.White;
+        btnCancel.FlatStyle = FlatStyle.Flat;
+        btnCancel.Click += delegate { form.Close(); };
+
+        bool installed = false;
+        string installedTo = target;
+
         btn.Click += delegate
         {
+            if (installed) { LaunchApp(installedTo); Application.Exit(); return; }
+            string chosen = (txtFolder.Text ?? "").Trim();
+            if (string.IsNullOrEmpty(chosen)) { MessageBox.Show("Folder instalasi belum dipilih.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            chosen = Path.GetFullPath(chosen);
+
             btn.Enabled = false;
-            status.Text = "Memasang...";
+            btnPick.Enabled = false;
+            txtFolder.Enabled = false;
+            status.Text = "Memasang ke: " + chosen;
             var t = new Thread(delegate()
             {
                 try
                 {
-                    RunInstall(target, delegate(int pct, string msg)
+                    RunInstall(chosen, delegate(int pct, string msg)
                     {
                         form.BeginInvoke((Action)delegate
                         {
@@ -115,21 +184,28 @@ static class Setup
                             status.Text = msg;
                         });
                     });
+                    installedTo = chosen;
                     form.BeginInvoke((Action)delegate
                     {
+                        installed = true;
                         bar.Value = 100;
                         btn.Enabled = true;
                         btn.Text = "Jalankan";
-                        status.Text = "Instalasi selesai. Shortcut sudah dibuat di Desktop dan Start Menu.";
-                        btn.Click += delegate { LaunchApp(target); Application.Exit(); };
+                        status.Text = "Selesai dipasang di: " + chosen + Environment.NewLine + "Shortcut OflaBot dibuat di Desktop dan Start Menu.";
                     });
                 }
                 catch (Exception ex)
                 {
                     form.BeginInvoke((Action)delegate
                     {
-                        MessageBox.Show("Instalasi gagal: " + ex.Message, AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        status.Text = "Instalasi gagal.";
+                        MessageBox.Show(
+                            "Instalasi gagal: " + ex.Message + Environment.NewLine + Environment.NewLine +
+                            "Pilih folder lain (mis. di D:\\OflaBot) atau jalankan installer sebagai Administrator.",
+                            AppName, MessageBoxButtons.OK, MessageBoxIcon.Error);
                         btn.Enabled = true;
+                        btnPick.Enabled = true;
+                        txtFolder.Enabled = true;
                     });
                 }
             });
@@ -138,48 +214,46 @@ static class Setup
         };
 
         form.Controls.Add(title);
+        form.Controls.Add(lblFolder);
+        form.Controls.Add(txtFolder);
+        form.Controls.Add(btnPick);
         form.Controls.Add(status);
         form.Controls.Add(bar);
+        form.Controls.Add(btnCancel);
         form.Controls.Add(btn);
         Application.Run(form);
     }
 
     // ---------------- install ----------------
-    static string ResolveTarget(string requested)
+    /// <summary>Pastikan folder tujuan bisa ditulis. Gagal = exception (tanpa fallback diam-diam).</summary>
+    static void EnsureWritable(string dir)
     {
-        string[] candidates = new string[] {
-            requested,
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", AppName),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppName),
-            Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), AppName),
-        };
-        Exception last = null;
-        foreach (string c in candidates)
-        {
-            try
-            {
-                Directory.CreateDirectory(c);
-                string probe = Path.Combine(c, ".write-test");
-                File.WriteAllText(probe, "ok");
-                File.Delete(probe);
-                return c;
-            }
-            catch (Exception ex) { last = ex; }
-        }
-        throw new InvalidOperationException("Tidak ada folder yang bisa ditulis untuk instalasi. " + (last != null ? last.Message : ""));
+        Directory.CreateDirectory(dir);
+        string probe = Path.Combine(dir, ".oflabot-write-test");
+        File.WriteAllText(probe, "ok");
+        File.Delete(probe);
     }
 
     static void RunInstall(string target, Action<int, string> progress)
     {
-        if (progress != null) progress(1, "Menyiapkan folder...");
-        target = ResolveTarget(target);
-        if (progress != null) progress(2, "Folder instalasi: " + target);
+        if (string.IsNullOrEmpty(target)) throw new InvalidOperationException("Folder instalasi kosong.");
+        target = Path.GetFullPath(target);
+        string log = LogPath(target);
 
-        // 1. ekstrak payload yang ter-embed
+        if (progress != null) progress(1, "Menyiapkan folder: " + target);
+        string parent = Path.GetDirectoryName(target);
+        if (!string.IsNullOrEmpty(parent)) { try { Directory.CreateDirectory(parent); } catch { } }
+        EnsureWritable(target);
+        try { File.Delete(log); } catch { }
+        ActiveLog = log;
+        ScriptDir = target;
+        Log(log, "install ke " + target);
+
+        // 1. Ekstrak payload.
         Stream payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip");
-        if (payload == null) throw new InvalidOperationException("payload.zip tidak ditemukan di dalam installer.");
+        if (payload == null) throw new InvalidOperationException("payload.zip tidak ditemukan di installer.");
 
-        if (progress != null) progress(5, "Mengekstrak aplikasi...");
+        if (progress != null) progress(5, "Mengekstrak aplikasi…");
         using (var zip = new ZipArchive(payload, ZipArchiveMode.Read))
         {
             long total = 0;
@@ -188,62 +262,26 @@ static class Setup
             foreach (var e in zip.Entries)
             {
                 string dest = Path.Combine(target, e.FullName.Replace('/', Path.DirectorySeparatorChar));
-                if (string.IsNullOrEmpty(e.Name))
-                {
-                    Directory.CreateDirectory(dest);
-                    continue;
-                }
+                if (string.IsNullOrEmpty(e.Name)) { Directory.CreateDirectory(dest); continue; }
                 Directory.CreateDirectory(Path.GetDirectoryName(dest));
                 e.ExtractToFile(dest, true);
                 done += e.Length;
-                if (progress != null && total > 0)
-                    progress(5 + (int)(80.0 * done / total), "Mengekstrak aplikasi... " + (done / 1048576) + " MB");
+                if (progress != null && total > 0) progress(5 + (int)(80.0 * done / total), "Mengekstrak aplikasi… " + (done / 1048576) + " MB");
             }
         }
+        if (!File.Exists(Path.Combine(target, CoreExe)) && !File.Exists(Path.Combine(target, AppExe)))
+            throw new InvalidOperationException("Aplikasi tidak ditemukan setelah ekstrak (payload rusak).");
+        Log(log, "ekstrak selesai");
 
-        // 2. uninstaller + shortcut + registry
-        if (progress != null) progress(90, "Membuat shortcut launcher...");
         string appPath = Path.Combine(target, AppExe);
 
-        // 2a. Uninstaller berbasis batch: transparan, tidak butuh proses .NET,
-        //     dan tetap bisa menghapus folder setelah aplikasi ditutup.
-        string uninstaller = Path.Combine(target, "uninstall.cmd");
-        try
-        {
-            string[] ul = new string[] {
-                "@echo off",
-                "setlocal enableextensions",
-                "set \"APPDIR=%~dp0\"",
-                "if \"%APPDIR:~-1%\"==\"\\\" set \"APPDIR=%APPDIR:~0,-1%\"",
-                "echo Menghapus " + AppName + "...",
-                "taskkill /f /im \"" + AppExe + "\" >nul 2>&1",
-                "ping 127.0.0.1 -n 3 >nul",
-                "del /f /q \"%USERPROFILE%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1",
-                "del /f /q \"%PUBLIC%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1",
-                "del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\\" + AppName + ".lnk\" >nul 2>&1",
-                "rmdir /s /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\" >nul 2>&1",
-                "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1",
-                "reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1",
-                "copy /y \"%~f0\" \"%TEMP%\\oflabot-uninstall-run.cmd\" >nul 2>&1",
-                "start \"\" powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"for($i=0;$i -lt 20;$i++){ Start-Sleep -Milliseconds 600; try { Remove-Item -LiteralPath '%APPDIR%' -Recurse -Force -ErrorAction Stop; break } catch {} }\"",
-                "exit /b 0",
-            };
-            File.WriteAllText(uninstaller, string.Join("\r\n", ul) + "\r\n");
-        }
-        catch { }
-
-        // 2a. Launcher yang aman dari SmartScreen.
-        // Menjalankan exe langsung dari shortcut/Explorer bisa diblokir
-        // "Windows protected your PC" (SmartScreen, exe tanpa code-signing).
-        // Solusinya: shortcut menunjuk ke wscript.exe (binary Microsoft, tepercaya),
-        // dan launcher VBS menjalankan exe lewat Win32_Process.Create (CreateProcess,
-        // bukan ShellExecute) sehingga tidak melewati pemeriksaan SmartScreen.
+        // 2. Launcher aman SmartScreen (wscript -> vbs -> CreateProcess/Win32_Process).
+        if (progress != null) progress(88, "Menyiapkan launcher…");
         string vbsPath = Path.Combine(target, "launch.vbs");
-        string batPath = Path.Combine(target, "Jalankan " + AppName + ".bat");
         try
         {
             string[] lines = new string[] {
-                "' OflaBot - launcher",
+                "' " + AppName + " - launcher",
                 "' Menjalankan exe via Win32_Process.Create (CreateProcess), bukan shell,",
                 "' supaya tidak terkena dialog SmartScreen \"Windows protected your PC\".",
                 "Dim fso, wmi, proc, exePath, workDir, cmd",
@@ -260,43 +298,33 @@ static class Setup
         catch { }
         try
         {
-            File.WriteAllText(batPath,
-                "@echo off\r\n" +
-                "set \"ELECTRON_RUN_AS_NODE=\"\r\n" +
-                "wscript.exe \"%~dp0launch.vbs\"\r\n");
+            File.WriteAllText(Path.Combine(target, "Jalankan " + AppName + ".bat"),
+                "@echo off\r\nset \"ELECTRON_RUN_AS_NODE=\"\r\nstart \"\" \"%~dp0" + AppExe + "\" " + AppArgs + "\r\n");
         }
         catch { }
 
-        // 2b. Shortcut Desktop + Start Menu (lewat wscript, ikon tetap ikon aplikasi).
-        string windir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        if (string.IsNullOrEmpty(windir)) windir = Environment.GetEnvironmentVariable("WINDIR") ?? @"C:\Windows";
-        string wscript = Path.Combine(windir, "System32", "wscript.exe");
-        string lnkArgs = "\"" + vbsPath + "\"";
-        string lnkTarget = File.Exists(wscript) ? wscript : appPath;
-        if (!File.Exists(wscript)) { lnkTarget = appPath; lnkArgs = AppArgs; }
+        // 3. Uninstaller batch (bisa berjalan walau folder sedang dipakai).
+        string uninstaller = Path.Combine(target, "uninstall.cmd");
+        try { File.WriteAllText(uninstaller, BuildUninstallCmd(), System.Text.Encoding.Default); } catch { }
 
-        bool smOk = CreateShortcut(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + ".lnk"),
-            lnkTarget, target, lnkArgs, appPath);
+        // 4. Shortcut Desktop + Start Menu (PowerShell WScript.Shell; fallback COM langsung).
+        if (progress != null) progress(92, "Membuat shortcut…");
+        string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         string programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
         string menuDir = Path.Combine(programs, AppName);
         try { Directory.CreateDirectory(menuDir); } catch { }
-        smOk &= CreateShortcut(Path.Combine(menuDir, AppName + ".lnk"), lnkTarget, target, lnkArgs, appPath);
-        CreateShortcut(Path.Combine(menuDir, "Uninstall " + AppName + ".lnk"), "cmd.exe", target, @"/c """"" + uninstaller + @"""", uninstaller);
 
-        // Catatan diagnosa (membantu kalau shortcut tidak terbentuk).
-        try
-        {
-            File.WriteAllText(Path.Combine(target, "install-log.txt"),
-                "waktu      : " + DateTime.Now.ToString("s") + "\r\n" +
-                "folder     : " + target + "\r\n" +
-                "wscript    : " + wscript + " (exists=" + File.Exists(wscript) + ")\r\n" +
-                "lnk target : " + lnkTarget + "\r\n" +
-                "lnk args   : " + lnkArgs + "\r\n" +
-                "shortcut ok: " + smOk + "\r\n");
-        }
-        catch { }
+        string lnkTarget = File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "wscript.exe"))
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "wscript.exe")
+            : appPath;
+        string lnkArgs = lnkTarget.ToLower().EndsWith("wscript.exe") ? "\"" + vbsPath + "\"" : AppArgs;
 
+        bool okDesktop = CreateShortcutRobust(Path.Combine(desktop, AppName + ".lnk"), lnkTarget, target, lnkArgs, appPath);
+        bool okMenu = CreateShortcutRobust(Path.Combine(menuDir, AppName + ".lnk"), lnkTarget, target, lnkArgs, appPath);
+        CreateShortcutRobust(Path.Combine(menuDir, "Uninstall " + AppName + ".lnk"), "cmd.exe", target, "/c \"\"" + uninstaller + "\"\"", uninstaller);
+        Log(log, "shortcut desktop=" + okDesktop + " startmenu=" + okMenu + " target=" + lnkTarget);
+
+        // 5. Registri Programs & Features.
         try
         {
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(UninstKey))
@@ -308,32 +336,136 @@ static class Setup
                     k.SetValue("Publisher", Publisher);
                     k.SetValue("DisplayIcon", appPath);
                     k.SetValue("InstallLocation", target);
-                    k.SetValue("UninstallString", "cmd.exe /c \"\"\"" + uninstaller + "\"\"\"");
-                    k.SetValue("QuietUninstallString", "cmd.exe /c \"\"\"" + uninstaller + "\"\"\"");
+                    k.SetValue("UninstallString", "cmd.exe /c \"\"" + uninstaller + "\"\"");
+                    k.SetValue("QuietUninstallString", "cmd.exe /c \"\"" + uninstaller + "\"\"");
                     k.SetValue("NoModify", 1, RegistryValueKind.DWord);
                     k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                    k.SetValue("EstimatedSize", 390000, RegistryValueKind.DWord);
+                    k.SetValue("EstimatedSize", 400000, RegistryValueKind.DWord);
                 }
             }
         }
-        catch { /* pendaftaran di "Programs and Features" opsional */ }
+        catch { }
 
-        if (progress != null) progress(100, "Selesai.");
+        Log(log, "selesai");
+        if (progress != null) progress(100, "Selesai: " + target);
     }
 
-    static bool CreateShortcut(string lnkPath, string targetPath, string workDir, string args = "", string iconPath = null)
+    static string BuildUninstallCmd()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("@echo off");
+        sb.AppendLine("setlocal enableextensions");
+        sb.AppendLine("if /i \"%~1\"==\"--clean\" goto :clean");
+        sb.AppendLine("set \"APPDIR=%~dp0\"");
+        sb.AppendLine("if \"%APPDIR:~-1%\"==\"\\\" set \"APPDIR=%APPDIR:~0,-1%\"");
+        sb.AppendLine("echo Menghapus " + AppName + "...");
+        sb.AppendLine("taskkill /f /im \"" + CoreExe + "\" >nul 2>&1");
+        sb.AppendLine("taskkill /f /im \"" + AppExe + "\" >nul 2>&1");
+        sb.AppendLine("ping 127.0.0.1 -n 3 >nul");
+        sb.AppendLine("del /f /q \"%USERPROFILE%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1");
+        sb.AppendLine("del /f /q \"%PUBLIC%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1");
+        sb.AppendLine("del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\\" + AppName + ".lnk\" >nul 2>&1");
+        sb.AppendLine("del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\\Uninstall " + AppName + ".lnk\" >nul 2>&1");
+        sb.AppendLine("rmdir /s /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\" >nul 2>&1");
+        sb.AppendLine("reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1");
+        sb.AppendLine("reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1");
+        // cache / profil / konfigurasi
+        sb.AppendLine("rmdir /s /q \"%APPDATA%\\OflaBot\" >nul 2>&1");
+        sb.AppendLine("rmdir /s /q \"%APPDATA%\\grokbot-desktop\" >nul 2>&1");
+        sb.AppendLine("rmdir /s /q \"%APPDATA%\\GrokBot Desktop Agent\" >nul 2>&1");
+        sb.AppendLine("rmdir /s /q \"%LOCALAPPDATA%\\OflaBot\" >nul 2>&1");
+        sb.AppendLine("del /f /q \"%LOCALAPPDATA%\\Temp\\oflabot-*\" >nul 2>&1");
+        sb.AppendLine("copy /y \"%~f0\" \"%TEMP%\\oflabot-uninstall-run.cmd\" >nul 2>&1");
+        sb.AppendLine("start \"\" /min cmd /c \"\"%TEMP%\\oflabot-uninstall-run.cmd\" --clean \"%APPDIR%\"\"");
+        sb.AppendLine("exit /b 0");
+        sb.AppendLine(":clean");
+        sb.AppendLine("ping 127.0.0.1 -n 3 >nul");
+        sb.AppendLine("for /l %%i in (1,1,30) do (");
+        sb.AppendLine("  if not exist \"%~2\" goto :done");
+        sb.AppendLine("  rd /s /q \"%~2\" >nul 2>&1");
+        sb.AppendLine("  if not exist \"%~2\" goto :done");
+        sb.AppendLine("  ping 127.0.0.1 -n 2 >nul");
+        sb.AppendLine(")");
+        sb.AppendLine(":done");
+        sb.AppendLine("del /f /q \"%~f0\" >nul 2>&1");
+        sb.AppendLine("exit /b 0");
+        return sb.ToString();
+    }
+
+    /// <summary>Buat shortcut: coba COM langsung, lalu PowerShell (file .ps1), lalu .url fallback.</summary>
+    static bool CreateShortcutRobust(string lnkPath, string targetPath, string workDir, string args, string iconPath)
+    {
+        Log(ActiveLog, "shortcut com -> " + lnkPath);
+        if (CreateShortcutCom(lnkPath, targetPath, workDir, args, iconPath)) return true;
+
+        // PowerShell lewat file .ps1 (lebih andal daripada -Command karena kutip tidak
+        // di-mangle oleh parsing argumen Windows).
+        try
+        {
+            string script = Path.Combine(ScriptDir, "oflabot-mkshortcut.ps1");
+            var sb = new StringBuilder();
+            sb.AppendLine("$ErrorActionPreference = 'Stop'");
+            sb.AppendLine("$ws = New-Object -ComObject WScript.Shell");
+            sb.AppendLine("$s = $ws.CreateShortcut('" + Esc(lnkPath) + "')");
+            sb.AppendLine("$s.TargetPath = '" + Esc(targetPath) + "'");
+            sb.AppendLine("$s.WorkingDirectory = '" + Esc(workDir) + "'");
+            sb.AppendLine("$s.IconLocation = '" + Esc(iconPath) + ",0'");
+            if (!string.IsNullOrEmpty(args)) sb.AppendLine("$s.Arguments = '" + Esc(args) + "'");
+            sb.AppendLine("$s.Save()");
+            Log(ActiveLog, "tulis script shortcut: " + script);
+            File.WriteAllText(script, sb.ToString(), System.Text.Encoding.UTF8);
+            Log(ActiveLog, "script ok: " + File.Exists(script));
+
+            var psi = new ProcessStartInfo("powershell.exe",
+                "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" + script + "\"")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            var p = Process.Start(psi);
+            string psErr = "", psOut = "";
+            if (p != null)
+            {
+                psOut = p.StandardOutput.ReadToEnd();
+                psErr = p.StandardError.ReadToEnd();
+                p.WaitForExit(20000);
+            }
+            Log(ActiveLog, "shortcut ps exit=" + (p != null ? p.ExitCode : -1) + " lnk=" + File.Exists(lnkPath) + " out=" + psOut.Trim() + " err=" + psErr.Trim().Replace(Environment.NewLine, " | "));
+            try { File.Delete(script); } catch { }
+            if (File.Exists(lnkPath)) return true;
+        }
+        catch { }
+
+        // fallback terakhir: file .url (masih bisa diklik user)
+        try
+        {
+            File.WriteAllText(Path.ChangeExtension(lnkPath, ".url"),
+                "[InternetShortcut]" + Environment.NewLine + "URL=file:///" + targetPath + Environment.NewLine + "IconFile=" + iconPath + Environment.NewLine);
+        }
+        catch { }
+        return false;
+    }
+
+    static string Esc(string s)
+    {
+        return (s ?? "").Replace("'", "''");
+    }
+
+    static bool CreateShortcutCom(string lnkPath, string targetPath, string workDir, string args, string iconPath)
     {
         try
         {
             Type t = Type.GetTypeFromProgID("WScript.Shell");
+            if (t == null) return false;
             object shell = Activator.CreateInstance(t);
             object sc = t.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { lnkPath });
             Type sct = sc.GetType();
             sct.InvokeMember("TargetPath", BindingFlags.SetProperty, null, sc, new object[] { targetPath });
             sct.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, sc, new object[] { workDir });
-            sct.InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { iconPath ?? targetPath });
-            if (!string.IsNullOrEmpty(args))
-                sct.InvokeMember("Arguments", BindingFlags.SetProperty, null, sc, new object[] { args });
+            sct.InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { iconPath });
+            if (!string.IsNullOrEmpty(args)) sct.InvokeMember("Arguments", BindingFlags.SetProperty, null, sc, new object[] { args });
             sct.InvokeMember("Save", BindingFlags.InvokeMethod, null, sc, null);
             return File.Exists(lnkPath);
         }
@@ -356,19 +488,23 @@ static class Setup
 
     static void LaunchApp(string target)
     {
-        try { Process.Start(Path.Combine(target, AppExe)); } catch { }
+        try
+        {
+            string vbs = Path.Combine(target, "launch.vbs");
+            if (File.Exists(vbs)) Process.Start("wscript.exe", "\"" + vbs + "\"");
+            else Process.Start(Path.Combine(target, AppExe), AppArgs);
+        }
+        catch { }
     }
 
     // ---------------- uninstall ----------------
     static void KillRunningApp()
     {
-        // PENTING: jangan pernah taskkill "Uninstall.exe" — itu proses kita sendiri.
-        string appImage = Path.GetFileNameWithoutExtension(AppExe);
-        foreach (string image in new string[] { appImage })
+        foreach (string image in new string[] { CoreExe, AppExe })
         {
             try
             {
-                var psi = new ProcessStartInfo("taskkill.exe", "/F /T /IM \"" + image + ".exe\"")
+                var psi = new ProcessStartInfo("taskkill.exe", "/F /T /IM \"" + image + "\"")
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,
@@ -380,7 +516,7 @@ static class Setup
             }
             catch { }
         }
-        System.Threading.Thread.Sleep(1200);
+        Thread.Sleep(1200);
     }
 
     static void TryDeleteFile(string path, int attempts = 6)
@@ -388,7 +524,7 @@ static class Setup
         for (int i = 0; i < attempts; i++)
         {
             try { if (File.Exists(path)) File.Delete(path); return; }
-            catch { System.Threading.Thread.Sleep(350); }
+            catch { Thread.Sleep(300); }
         }
     }
 
@@ -397,69 +533,59 @@ static class Setup
         for (int i = 0; i < attempts; i++)
         {
             try { if (Directory.Exists(path)) Directory.Delete(path, true); return; }
-            catch { System.Threading.Thread.Sleep(350); }
+            catch { Thread.Sleep(300); }
         }
-    }
-
-    static void UninstallLog(string file, string text)
-    {
-        try { File.AppendAllText(file, "[" + DateTime.Now.ToString("HH:mm:ss") + "] " + text + Environment.NewLine); } catch { }
     }
 
     static void Uninstall(bool silent)
     {
-        string log = Path.Combine(Path.GetTempPath(), "oflabot-uninstall.log");
-        try { File.Delete(log); } catch { }
-        UninstallLog(log, "mulai uninstall");
-
-        // Folder install ditentukan dari lokasi file exe ini (paling andal),
-        // lalu fallback ke registry / lokasi default.
         string self = Assembly.GetExecutingAssembly().Location;
         string target = Path.GetDirectoryName(self);
-        if (!File.Exists(Path.Combine(target, AppExe)))
+        if (!File.Exists(Path.Combine(target, CoreExe)) && !File.Exists(Path.Combine(target, AppExe)))
         {
             string reg = ReadInstallLocation();
-            target = reg != null ? reg : InstallDir;
+            target = !string.IsNullOrEmpty(reg) ? reg : DefaultInstallDir;
         }
 
-        // 1. Hentikan aplikasi (file terkunci selama aplikasi berjalan).
         KillRunningApp();
 
-        // 2. Hapus shortcut: desktop user, desktop publik, Start Menu (user & all users).
-        UninstallLog(log, "target=" + target);
-        string[] desktops = new string[] {
+        // Shortcut (user + publik) + Start Menu.
+        foreach (string desk in new string[] {
             Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
-        };
-        foreach (string desk in desktops)
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) })
         {
-            if (string.IsNullOrEmpty(desk)) { UninstallLog(log, "desk kosong"); continue; }
-            string lnk = Path.Combine(desk, AppName + ".lnk");
-            bool existed = File.Exists(lnk);
-            TryDeleteFile(lnk);
-            UninstallLog(log, "shortcut " + lnk + " existed=" + existed + " now=" + File.Exists(lnk));
+            if (string.IsNullOrEmpty(desk)) continue;
+            TryDeleteFile(Path.Combine(desk, AppName + ".lnk"));
         }
-        string[] programDirs = new string[] {
+        foreach (string prog in new string[] {
             Environment.GetFolderPath(Environment.SpecialFolder.Programs),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms),
-        };
-        foreach (string prog in programDirs)
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms) })
         {
             if (string.IsNullOrEmpty(prog)) continue;
             TryDeleteDir(Path.Combine(prog, AppName));
             TryDeleteFile(Path.Combine(prog, AppName + ".lnk"));
         }
 
-        // 3. Hapus entri "Programs and Features".
+        // Registry.
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
         try { Registry.LocalMachine.DeleteSubKeyTree(UninstKey, false); } catch { }
 
-        // 4. Hapus isi folder instalasi (kecuali exe uninstaller ini), lalu sisanya
-        //    dijadwalkan lewat cmd setelah proses ini keluar.
+        // Cache / profil aplikasi (termasuk profil versi lama GrokBot).
+        string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        foreach (string dir in new string[] {
+            Path.Combine(appData, AppName),
+            Path.Combine(appData, "grokbot-desktop"),
+            Path.Combine(appData, "GrokBot Desktop Agent"),
+            Path.Combine(localAppData, AppName) })
+        {
+            TryDeleteDir(dir);
+        }
+
+        // Isi folder instalasi (kecuali diri sendiri).
         try
         {
-            foreach (string dir in Directory.GetDirectories(target))
-                TryDeleteDir(dir);
+            foreach (string dir in Directory.GetDirectories(target)) TryDeleteDir(dir);
             foreach (string file in Directory.GetFiles(target))
             {
                 if (string.Equals(Path.GetFullPath(file), Path.GetFullPath(self), StringComparison.OrdinalIgnoreCase)) continue;
@@ -468,11 +594,10 @@ static class Setup
         }
         catch { }
 
-        // 5. Bersihkan sisa folder + diri sendiri setelah proses keluar.
-        //    cmd mengulang rmdir beberapa kali karena file bisa masih terkunci sesaat.
+        // Sisa folder + diri sendiri dihapus setelah proses keluar.
         string cmd =
             "/c ping 127.0.0.1 -n 3 >nul & " +
-            "(for /l %i in (1,1,12) do (del /f /q \"" + self + "\" >nul 2>&1 & " +
+            "(for /l %i in (1,1,20) do (del /f /q \"" + self + "\" >nul 2>&1 & " +
             "rmdir /s /q \"" + target + "\" >nul 2>&1 & " +
             "if not exist \"" + target + "\" exit /b 0 & ping 127.0.0.1 -n 2 >nul))";
         try
@@ -487,7 +612,6 @@ static class Setup
         catch { }
 
         if (!silent)
-            MessageBox.Show(AppName + " telah dihapus." + Environment.NewLine +
-                "Folder: " + target, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(AppName + " telah dihapus." + Environment.NewLine + target, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 }

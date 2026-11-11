@@ -6,7 +6,7 @@ import { PROVIDERS, getProvider, isAnthropicLike } from './providers';
 type Role = 'user' | 'assistant' | 'tool' | 'system' | 'notice';
 type Msg = { role: Role; content: any; name?: string; tool_call_id?: string; tool_calls?: any[]; image?: string; ts?: number };
 type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number };
-type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean };
+type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean; accessMode: 'normal' | 'full' };
 
 type ActivityItem = { name: string; args?: any; result?: any; image?: string; denied?: boolean };
 type Block =
@@ -39,7 +39,7 @@ function readKey(key: string, legacy?: string): string | null {
 }
 
 function loadSettings(): Settings {
-  const fallback: Settings = { provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o', autoLearn: true };
+  const fallback: Settings = { provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o', autoLearn: true, accessMode: 'normal' };
   try {
     const raw = readKey(SETTINGS_KEY, LEGACY.settings);
     if (raw) {
@@ -52,6 +52,7 @@ function loadSettings(): Settings {
           apiKey: p.apiKey ?? '',
           model: p.model ?? '',
           autoLearn: p.autoLearn !== false,
+          accessMode: p.accessMode === 'full' ? 'full' : 'normal',
         };
       }
     }
@@ -170,6 +171,7 @@ export default function App() {
   const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate'>(null);
   const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [autoApprove, setAutoApprove] = useState(false);
 
   // model dropdown
   const [models, setModels] = useState<string[]>([]);
@@ -425,8 +427,16 @@ export default function App() {
           let args: any = {};
           try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
 
-          if (isDangerous(name, args)) {
-            const ok = await window.dsh.confirm(`Izinkan aksi "${name}"?\n${JSON.stringify(args).slice(0, 300)}`);
+          const fullAccess = settings.accessMode === 'full' || autoApprove;
+          if (isDangerous(name, args) && !fullAccess) {
+            const ok = await window.dsh.confirm(
+              `Izinkan aksi "${name}"?\n${JSON.stringify(args).slice(0, 300)}\n\n` +
+              `Klik Allow = izinkan semua aksi berikutnya di sesi ini (Full Access).`,
+            );
+            if (ok) {
+              setAutoApprove(true);
+              flash('Full Access aktif untuk sesi ini — tidak akan bertanya lagi.');
+            }
             if (!ok) {
               const denied = { error: 'dibatalkan pengguna' };
               msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(denied), name });
@@ -629,6 +639,16 @@ export default function App() {
               onClick={() => setBrowserOpen((v) => !v)}>🌐</button>
           </div>
           <div className="topbar-info">
+            <button
+              className={`pill access ${settings.accessMode === 'full' || autoApprove ? 'full' : ''}`}
+              title="Klik untuk mengubah mode akses (Normal / Full Access)"
+              onClick={() => {
+                if (settings.accessMode === 'full') { setSettings((s) => ({ ...s, accessMode: 'normal' })); setAutoApprove(false); flash('Mode Normal: aksi berbahaya minta konfirmasi.'); }
+                else { setSettings((s) => ({ ...s, accessMode: 'full' })); flash('Full Access: semua aksi dijalankan tanpa konfirmasi.'); }
+              }}
+            >
+              {settings.accessMode === 'full' || autoApprove ? '🔓 Full Access' : '🔒 Normal'}
+            </button>
             <span className="pill">{agent.icon} {agent.name}</span>
             <span className="pill muted">{settings.model || 'pilih model'}</span>
             <span className="pill muted">{prov.name}</span>
@@ -784,6 +804,18 @@ export default function App() {
                     <input type="checkbox" checked={settings.autoLearn} onChange={(e) => setSettings((s) => ({ ...s, autoLearn: e.target.checked }))} />
                     Belajar otomatis (simpan memory & skill dari tiap sesi)
                   </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={settings.accessMode === 'full'}
+                      onChange={(e) => {
+                        setSettings((s) => ({ ...s, accessMode: e.target.checked ? 'full' : 'normal' }));
+                        setAutoApprove(false);
+                      }}
+                    />
+                    Full Access — jalankan aksi berbahaya tanpa konfirmasi
+                  </label>
+                  <div className="hint">Tanpa Full Access: dialog konfirmasi muncul sekali, lalu semua aksi berikutnya di sesi itu otomatis diizinkan (klik Allow).</div>
                   <div className="hint">Versi {appVersion || '0.2.1'} · OflaBot</div>
                 </div>
               )}

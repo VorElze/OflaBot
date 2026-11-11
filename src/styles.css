@@ -332,3 +332,8 @@ pre.mono { margin: 0; white-space: pre-wrap; }
   border: 2px solid #2b3a5f; border-top-color: #2b5cff; animation: spin 1s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ===== mode akses (Full Access) ===== */
+.pill.access { cursor: pointer; border-color: #2b3a5f; color: #9db4ff; }
+.pill.access:hover { background: #1d2740; }
+.pill.access.full { background: #3a1f14; border-color: #7a3f1f; color: #ffb37a; }

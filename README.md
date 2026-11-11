@@ -143,3 +143,17 @@ Kalau OflaBot membantu pekerjaan Anda:
 ## ðŸ“„ Lisensi
 
 [MIT](LICENSE)
+
+## ?? Mode akses (Full Access)
+
+- Toolbar kanan: tombol **?? Normal / ?? Full Access** — klik untuk berganti.
+- **Settings ? Full Access** juga tersedia.
+- Mode Normal: dialog izin muncul sekali; klik **Allow** lalu semua aksi berikutnya
+  di sesi itu otomatis diizinkan. Klik **Cancel** untuk menolak aksi tersebut.
+
+## ?? Uninstall menyeluruh
+
+Jalankan `uninstall.cmd` di folder instalasi (atau Start Menu ? OflaBot ? Uninstall).
+Yang dihapus: proses aplikasi, shortcut Desktop + Start Menu, entri registry,
+folder instalasi, serta cache/profil (`%APPDATA%\OflaBot`,
+`%APPDATA%\grokbot-desktop`, `%LOCALAPPDATA%\OflaBot`).
