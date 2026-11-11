@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('dsh', {
   // --- chat / provider ---
   chat: (payload: any) => ipcRenderer.invoke('chat:send', payload),
 
+  clipboard: { image: () => ipcRenderer.invoke('clipboard:image') },
+
   // --- export & feedback ---
   sessionExport: (payload: any) => ipcRenderer.invoke('session:export', payload),
   feedback: (entry: any) => ipcRenderer.invoke('feedback:save', entry),

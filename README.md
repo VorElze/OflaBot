@@ -192,3 +192,17 @@ Tombol **＋** di kotak pesan (mirip DSH):
 | 🧠 Model | pilih model (dropdown dari API provider) |
 | ⬇ Export | simpan log sesi (Markdown/JSON/ZIP) |
 | ▸ Shell command | jalankan perintah tanpa AI |
+## ⚡ Token Saver (v0.2.6)
+
+Menu sidebar **⚡ Token Saver** — fitur hemat token yang bisa dinyalakan/dimatikan:
+
+| Fitur | Efek |
+|---|---|
+| **Compress tool output** (RTK) | hasil tool diringkas sebelum dikirim ke model (UI tetap lengkap) |
+| **Compress LLM output** (Caveman) | model menjawab gaya telegrafis, token output hemat |
+| **Lazy senior dev** (Ponytail) | bias solusi minimal: YAGNI, reuse library, hapus > menambah |
+
+## Tempel screenshot
+
+Tekan **Ctrl+V** di kotak pesan untuk melampirkan screenshot dari clipboard
+(Win+Shift+S → Ctrl+V). Bisa juga **Ctrl+U** atau **＋ → File**.

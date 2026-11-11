@@ -223,6 +223,31 @@ app.whenReady().then(() => {
           } catch (e) { console.log('MENU_TEST_ERR ' + e); }
           await new Promise((r) => setTimeout(r, 800));
         }
+        // Uji move beda drive + panel Token Saver.
+        if (process.env.OFLABOT_SMOKE_MOVE) {
+          try {
+            const r = await win!.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              await window.dsh.fs.mkdir('D:/DeepSeek/aplikasi/.movetest/src');
+              out.write = await window.dsh.fileWrite('D:/DeepSeek/aplikasi/.movetest/src/a.txt', 'isi-uji');
+              out.srcBefore = (await window.dsh.fs.list('D:/DeepSeek/aplikasi/.movetest/src')).count;
+              out.move = await window.dsh.fs.move('D:/DeepSeek/aplikasi/.movetest/src/a.txt', 'D:/DeepSeek/aplikasi/.movetest/dst/a.txt', { overwrite: true, __forceFallback: true });
+              out.srcAfter = (await window.dsh.fs.list('D:/DeepSeek/aplikasi/.movetest/src')).count;
+              out.dstAfter = (await window.dsh.fs.list('D:/DeepSeek/aplikasi/.movetest/dst')).count;
+              await window.dsh.exec('rmdir /s /q "D:\\DeepSeek\\aplikasi\\.movetest"', { timeoutMs: 10000 });
+              // panel token saver
+              const btns = Array.from(document.querySelectorAll('.side-btn'));
+              const tsBtn = btns.find((b) => b.innerText.includes('Token Saver'));
+              if (tsBtn) tsBtn.click();
+              await new Promise((res) => setTimeout(res, 500));
+              out.panel = !!document.querySelector('.ts-panel');
+              out.toggles = document.querySelectorAll('.ts-panel .switch input').length;
+              return out;
+            })()`);
+            console.log('MOVE_TEST ' + JSON.stringify(r));
+          } catch (e) { console.log('MOVE_TEST_ERR ' + e); }
+          await new Promise((r) => setTimeout(r, 700));
+        }
         // Demo: isi sesi contoh (tool calls) untuk memeriksa render gaya DSH.
         if (process.env.OFLABOT_SMOKE_DEMO) {
           await win!.webContents.executeJavaScript(`(() => {
@@ -665,10 +690,38 @@ ipcMain.handle('fs:move', async (_e, src: string, dest: string, opts?: { overwri
     await fsP.mkdir(path.dirname(d), { recursive: true });
     const exists = await fsP.stat(d).then(() => true).catch(() => false);
     if (exists && !opts?.overwrite) return { error: 'tujuan sudah ada: ' + d, hint: 'set overwrite=true atau ganti nama tujuan' };
-    if (opts?.copy) await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
-    else await fsP.rename(s, d);
-    return { ok: true, from: s, to: d, copy: !!opts?.copy };
-  } catch (e: any) { return { error: e?.message || String(e) }; }
+
+    if (opts?.copy) {
+      // Mode copy: sumber tetap ada (memang duplikat).
+      await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
+      return { ok: true, from: s, to: d, copy: true };
+    }
+
+    // Mode MOVE: rename dulu (cepat, satu volume). Jika beda drive (EXDEV),
+    // fallback: copy -> verifikasi -> hapus sumber. Tanpa ini file tertinggal
+    // di sumber sehingga terlihat "dobel".
+    let method = 'rename';
+    const forceFallback = !!(opts as any)?.__forceFallback;
+    try {
+      if (forceFallback) throw Object.assign(new Error('forced EXDEV'), { code: 'EXDEV' });
+      await fsP.rename(s, d);
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      if (code !== 'EXDEV' && code !== 'EPERM' && code !== 'EACCES') throw err;
+      method = 'copy+delete';
+      await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
+      const [srcStat, dstStat] = await Promise.all([fsP.stat(s), fsP.stat(d)]);
+      if (srcStat.isDirectory()) {
+        if (!dstStat.isDirectory()) throw new Error('verifikasi gagal: tujuan bukan folder');
+      } else {
+        if (dstStat.size !== srcStat.size) throw new Error('verifikasi gagal: ukuran berbeda (' + srcStat.size + ' vs ' + dstStat.size + ')');
+      }
+      await fsP.rm(s, { recursive: true, force: true });
+      const stillThere = await fsP.stat(s).then(() => true).catch(() => false);
+      if (stillThere) throw new Error('gagal menghapus sumber setelah copy: ' + s);
+    }
+    return { ok: true, from: s, to: d, copy: false, method };
+  } catch (e: any) { return { error: e?.message || String(e), code: e?.code }; }
 });
 
 ipcMain.handle('fs:read', async (_e, file: string, maxBytes?: number) => {
@@ -910,6 +963,44 @@ ipcMain.handle('dialog:pickFiles', async (_e, mode?: string) => {
   } catch (err: any) {
     return { error: err?.message || String(err), files: [] };
   }
+});
+
+// ===========================================================================
+// Clipboard: tempel gambar (screenshot) ke chat.
+// ===========================================================================
+
+// ===========================================================================
+// Clipboard: tempel gambar (screenshot) ke chat.
+// ===========================================================================
+ipcMain.handle('clipboard:image', async () => {
+  // Windows: ambil gambar dari clipboard lewat .NET (STA), simpan PNG sementara.
+  return new Promise((resolve) => {
+    const ps = [
+      'Add-Type -AssemblyName System.Windows.Forms',
+      'Add-Type -AssemblyName System.Drawing',
+      '$img = [System.Windows.Forms.Clipboard]::GetImage()',
+      'if ($img -eq $null) { Write-Output "NOIMAGE"; exit 1 }',
+      '$p = Join-Path $env:TEMP ("oflabot-paste-" + [guid]::NewGuid().ToString("N") + ".png")',
+      '$img.Save($p, [System.Drawing.Imaging.ImageFormat]::Png)',
+      'Write-Output $p',
+    ].join('; ');
+    const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', ps]);
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.on('error', (e: any) => resolve({ ok: false, error: e?.message || String(e) }));
+    child.on('close', () => {
+      const lines = out.trim().split(/\r?\n/);
+      const file = lines[lines.length - 1] || '';
+      if (!file || !fs.existsSync(file)) return resolve({ ok: false, note: 'clipboard tidak berisi gambar' });
+      try {
+        const buf = fs.readFileSync(file);
+        try { fs.unlinkSync(file); } catch { /* ignore */ }
+        resolve({ ok: true, dataUrl: 'data:image/png;base64,' + buf.toString('base64') });
+      } catch (err) {
+        resolve({ ok: false, error: String(err) });
+      }
+    });
+  });
 });
 
 // ===========================================================================

@@ -7,7 +7,11 @@ type Role = 'user' | 'assistant' | 'tool' | 'system' | 'notice';
 type Msg = { role: Role; content: any; name?: string; tool_call_id?: string; tool_calls?: any[]; image?: string; ts?: number };
 type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number; goal?: string; planMode?: boolean };
 type Permission = 'read-only' | 'workspace' | 'full';
-type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean; accessMode: 'normal' | 'full'; permission: Permission };
+type Settings = {
+  provider: string; baseUrl: string; apiKey: string; model: string;
+  autoLearn: boolean; accessMode: 'normal' | 'full'; permission: Permission;
+  tokenSaver: { rtk: boolean; caveman: boolean; ponytail: boolean };
+};
 
 type ActivityItem = { name: string; args?: any; result?: any; image?: string; denied?: boolean };
 type Attachment = { kind: 'image' | 'text' | 'meta'; name: string; path: string; dataUrl?: string; content?: string; size?: number };
@@ -41,7 +45,11 @@ function readKey(key: string, legacy?: string): string | null {
 }
 
 function loadSettings(): Settings {
-  const fallback: Settings = { provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o', autoLearn: true, accessMode: 'normal', permission: 'workspace' };
+  const fallback: Settings = {
+  provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o',
+  autoLearn: true, accessMode: 'normal', permission: 'workspace',
+  tokenSaver: { rtk: true, caveman: false, ponytail: false },
+};
   try {
     const raw = readKey(SETTINGS_KEY, LEGACY.settings);
     if (raw) {
@@ -56,6 +64,11 @@ function loadSettings(): Settings {
           autoLearn: p.autoLearn !== false,
           accessMode: p.accessMode === 'full' ? 'full' : 'normal',
           permission: (p.permission as Permission) || (p.accessMode === 'full' ? 'full' : 'workspace'),
+          tokenSaver: {
+            rtk: p.tokenSaver?.rtk !== false,
+            caveman: p.tokenSaver?.caveman === true,
+            ponytail: p.tokenSaver?.ponytail === true,
+          },
         };
       }
     }
@@ -129,6 +142,51 @@ function pretty(v: any, max = 900): string {
   } catch { return String(v); }
 }
 
+/**
+ * Token Saver — RTK (Compress tool output).
+ * Ringkas hasil tool untuk dikirim ke model: buang key besar, batasi list & panjang.
+ * UI tetap menampilkan versi penuh.
+ */
+function compressToolResult(name: string, result: any, full: string): string {
+  const MAX = 1200;
+  try {
+    if (!result || typeof result !== 'object') return String(full).slice(0, MAX);
+
+    // Daftar file/folder: ringkas jadi hitungan + sampel
+    if (Array.isArray(result.entries)) {
+      const entries = result.entries as any[];
+      const sample = entries.slice(0, 8).map((e) => (e.dir ? '[dir] ' : '') + (e.name || e.path));
+      return JSON.stringify({
+        ok: result.ok, base: result.base, count: result.count, truncated: result.truncated,
+        sample, note: entries.length > sample.length ? `${entries.length - sample.length} entri lain disembunyikan (token saver)` : undefined,
+      }).slice(0, MAX);
+    }
+
+    // exec: kode + potongan output
+    if ('stdout' in result || 'stderr' in result) {
+      return JSON.stringify({
+        code: result.code, timedOut: result.timedOut, truncated: result.truncated,
+        stdout: String(result.stdout || '').slice(0, 600),
+        stderr: String(result.stderr || '').slice(0, 400),
+      }).slice(0, MAX);
+    }
+
+    // browser_text / teks panjang
+    if (typeof result.text === 'string' && result.text.length > 500) {
+      return JSON.stringify({ ...result, text: result.text.slice(0, 700) + '…(dipotong token saver)' }).slice(0, MAX);
+    }
+
+    // gambar tidak perlu base64 di teks
+    if (result.dataUrl) return JSON.stringify({ ...result, dataUrl: '(gambar)' }).slice(0, MAX);
+
+    // generik: minify + batasi
+    const minified = JSON.stringify(result).replace(/\s{2,}/g, ' ');
+    return minified.length > MAX ? minified.slice(0, MAX) + '…(dipotong token saver)' : minified;
+  } catch {
+    return String(full).slice(0, MAX);
+  }
+}
+
 /** Kelompokkan pesan menjadi blok: bubble user/assistant dan aktivitas tool (collapsible). */
 function buildBlocks(messages: Msg[]): Block[] {
   const blocks: Block[] = [];
@@ -191,7 +249,7 @@ export default function App() {
   const [browserOpen, setBrowserOpen] = useState<boolean>(() => {
     try { return localStorage.getItem(BROWSER_OPEN_KEY) !== '0'; } catch { return true; }
   });
-  const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate'>(null);
+  const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate' | 'tokensaver'>(null);
   const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [autoApprove, setAutoApprove] = useState(false);
@@ -415,6 +473,18 @@ export default function App() {
       extra += '\n\n=== GOAL SESI (tujuan jangka panjang) ===\n' + cur.goal +
         '\nSelalu arahkan pekerjaan menuju goal ini. Jika goal sudah tercapai, nyatakan dengan jelas.';
     }
+    if (settings.tokenSaver?.caveman) {
+      extra += '\n\n=== TOKEN SAVER: CAVEMAN (output ringkas) ===\n' +
+        'Jawab sesingkat mungkin. Gaya telegrafis: tanpa salam, tanpa basa-basi, tanpa pengulangan. ' +
+        'Pakai poin-poin bila membantu. Frasa seperti "berikut adalah", "tentu", "semoga membantu" DILARANG. ' +
+        'Tetap akurat dan lengkap secara informasi.';
+    }
+    if (settings.tokenSaver?.ponytail) {
+      extra += '\n\n=== TOKEN SAVER: LAZY SENIOR DEV ===\n' +
+        'Bias ke solusi paling kecil yang bekerja: YAGNI, pakai standar/library yang sudah ada, ' +
+        'lebih baik menghapus daripada menambah. Jangan menulis kode yang tidak diminta. ' +
+        'Sebelum menulis kode baru, cek apakah fungsi serupa sudah ada (file_list/file_stat).';
+    }
     if (cur?.planMode) {
       extra += '\n\n=== MODE RENCANA (PLAN) ===\n' +
         'Kamu HANYA menyusun rencana. JANGAN mengubah apa pun di komputer: jangan panggil exec, file_move, file_write, launch, mouse, type, keys. ' +
@@ -427,6 +497,40 @@ export default function App() {
   pickFilesRef.current = () => pickFiles();
   const permission: Permission = settings.permission || (settings.accessMode === 'full' ? 'full' : 'workspace');
 
+  async function handlePaste(e: React.ClipboardEvent) {
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageItem = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'));
+    if (imageItem) {
+      e.preventDefault();
+      const file = imageItem.getAsFile();
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || '');
+        const att: Attachment = {
+          kind: 'image',
+          name: `screenshot-${new Date().toISOString().slice(11, 19).replace(/:/g, '-')}.png`,
+          path: '(clipboard)',
+          dataUrl,
+          size: file.size,
+        };
+        setAttachments((prev) => [...prev, att].slice(-10));
+        flash('Screenshot dilampirkan. Kirim pesan untuk mengirim ke AI.');
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+    // Fallback Windows: clipboard berisi gambar tanpa file item
+    if (!e.clipboardData?.getData('text')) {
+      const res = await window.dsh.clipboard.image();
+      if (res?.ok && res.dataUrl) {
+        e.preventDefault();
+        const att: Attachment = { kind: 'image', name: `screenshot-${Date.now()}.png`, path: '(clipboard)', dataUrl: res.dataUrl };
+        setAttachments((prev) => [...prev, att].slice(-10));
+        flash('Screenshot dari clipboard dilampirkan.');
+      }
+    }
+  }
   async function pickFiles(mode?: 'image') {
     setMenuOpen(false);
     const res = await window.dsh.files.pick(mode);
@@ -593,7 +697,8 @@ export default function App() {
       return last;
     };
 
-    while (steps < 26 && !abortRef.current) {
+    let blockedRepeats = 0;
+    while (!abortRef.current) {
       steps++;
 
       // Pengingat otomatis (tanpa terlihat pengguna): kalau rencana belum dibuat.
@@ -646,6 +751,7 @@ export default function App() {
           };
 
           if (seen >= 3) {
+            blockedRepeats++;
             pushToolResult({
               error: 'loop terdeteksi',
               hint:
@@ -692,9 +798,12 @@ export default function App() {
           const image = extractImage(result);
           const clean = { ...result };
           if (clean.dataUrl) clean.dataUrl = '(gambar terkirim terpisah)';
-          const contentStr = JSON.stringify(clean).slice(0, 6000);
+          const fullStr = JSON.stringify(clean);
+          // Token Saver (RTK): yang dikirim ke MODEL diringkas; UI tetap menyimpan versi penuh.
+          const modelStr = settings.tokenSaver?.rtk ? compressToolResult(name, clean, fullStr) : fullStr.slice(0, 6000);
+          const contentStr = fullStr.slice(0, 6000);
 
-          msgs.push({ role: 'tool', tool_call_id: tc.id, content: contentStr, name });
+          msgs.push({ role: 'tool', tool_call_id: tc.id, content: modelStr, name });
           appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: contentStr, image: image || undefined });
 
           if (image) {
@@ -720,14 +829,8 @@ export default function App() {
       break;
     }
 
-    if (steps >= 26) {
-      hitLimit = true;
-      appendMessage(sessionId, {
-        role: 'notice',
-        content: 'Batas 26 langkah tercapai. Klik tombol "Lanjutkan" atau kirim "lanjutkan" untuk melanjutkan, atau uraikan tugas menjadi bagian lebih kecil.',
-      });
-    }
-    setStepLimitHit(hitLimit);
+    if (hitLimit) setStepLimitHit(true);
+
     setRunning(false);
     void refreshMemory();
   }
@@ -904,6 +1007,7 @@ export default function App() {
         <div className="side-actions">
           <button className="side-btn" onClick={() => { setPanel('memory'); void refreshMemory(); }}>🧠 Memory <span className="badge">{memCount}/{skillMemCount}</span></button>
           <button className="side-btn" onClick={() => { setPanel('skills'); void refreshSkills(); }}>🧩 Skills <span className="badge">{skillList.filter((s) => s.enabled).length}/{skillList.length}</span></button>
+          <button className="side-btn" onClick={() => setPanel('tokensaver')}>⚡ Token Saver <span className="badge">{[settings.tokenSaver.rtk ? 'RTK' : '', settings.tokenSaver.caveman ? 'Caveman' : '', settings.tokenSaver.ponytail ? 'Ponytail' : ''].filter(Boolean).join('·') || 'off'}</span></button>
           <button className="side-btn" onClick={() => setPanel('settings')}>⚙ Settings</button>
           <button className="side-btn donate" onClick={() => setPanel('donate')}>❤ Dukung OflaBot</button>
         </div>
@@ -1123,11 +1227,7 @@ export default function App() {
               <div className="composer-actions">
                 <button className="btn primary" onClick={() => void send()} disabled={running}>Send</button>
                 <button className="btn" onClick={() => { abortRef.current = true; }} disabled={!running}>Stop</button>
-                {stepLimitHit && !running && (
-                  <button className="btn continue" onClick={() => { setInput('lanjutkan'); setTimeout(() => void send(), 60); }}>
-                    ▶ Lanjutkan
-                  </button>
-                )}
+
                 <button className="btn ghost" onClick={() => active && updateSession(active.id, (s) => ({ ...s, messages: [] }))}>Clear</button>
               </div>
             </div>
@@ -1242,6 +1342,7 @@ export default function App() {
             <div className="modal-head">
               <h3>
                 {panel === 'settings' && '⚙ Settings'}
+                {panel === 'tokensaver' && '⚡ Token Saver'}
                 {panel === 'memory' && '🧠 Memory & Skill Belajar'}
                 {panel === 'skills' && '🧩 Skills'}
                 {panel === 'donate' && '❤ Dukung OflaBot'}
@@ -1298,6 +1399,56 @@ export default function App() {
                   </label>
                   <div className="hint">Tanpa Full Access: dialog konfirmasi muncul sekali, lalu semua aksi berikutnya di sesi itu otomatis diizinkan (klik Allow).</div>
                   <div className="hint">Versi {appVersion || '0.2.1'} · OflaBot</div>
+                </div>
+              )}
+
+              {panel === 'tokensaver' && (
+                <div className="ts-panel">
+                  <div className="hint">Hemat token & biaya. Semua fitur bisa dinyalakan/dimatikan kapan saja dan berlaku untuk semua sesi.</div>
+
+                  <div className="ts-item">
+                    <div className="ts-text">
+                      <div className="ts-title">Compress tool output <span className="ts-badge">RTK</span></div>
+                      <div className="ts-desc">Hasil tool (file_list, exec, browser_text) diringkas sebelum dikirim ke model — jauh lebih sedikit token. Tampilan di layar tetap lengkap.</div>
+                    </div>
+                    <label className="switch">
+                      <input type="checkbox" checked={settings.tokenSaver.rtk}
+                        onChange={(e) => setSettings((s) => ({ ...s, tokenSaver: { ...s.tokenSaver, rtk: e.target.checked } }))} />
+                      <span className="slider" />
+                    </label>
+                  </div>
+
+                  <div className="ts-item">
+                    <div className="ts-text">
+                      <div className="ts-title">Compress LLM output <span className="ts-badge">Caveman</span></div>
+                      <div className="ts-desc">Model diminta menjawab gaya telegrafis: tanpa salam & basa-basi, poin singkat. Menghemat token output.</div>
+                    </div>
+                    <label className="switch">
+                      <input type="checkbox" checked={settings.tokenSaver.caveman}
+                        onChange={(e) => setSettings((s) => ({ ...s, tokenSaver: { ...s.tokenSaver, caveman: e.target.checked } }))} />
+                      <span className="slider" />
+                    </label>
+                  </div>
+
+                  <div className="ts-item">
+                    <div className="ts-text">
+                      <div className="ts-title">Lazy senior dev <span className="ts-badge">Ponytail</span></div>
+                      <div className="ts-desc">Bias ke solusi paling kecil: YAGNI, pakai library yang sudah ada, hapus daripada menambah. Cocok untuk tugas coding.</div>
+                    </div>
+                    <label className="switch">
+                      <input type="checkbox" checked={settings.tokenSaver.ponytail}
+                        onChange={(e) => setSettings((s) => ({ ...s, tokenSaver: { ...s.tokenSaver, ponytail: e.target.checked } }))} />
+                      <span className="slider" />
+                    </label>
+                  </div>
+
+                  <div className="ts-note">
+                    Status: {[settings.tokenSaver.rtk ? 'RTK' : null, settings.tokenSaver.caveman ? 'Caveman' : null, settings.tokenSaver.ponytail ? 'Ponytail' : null].filter(Boolean).join(' · ') || 'tidak ada (token penuh)'}
+                  </div>
+                  <div className="row-gap end">
+                    <button className="btn ghost" onClick={() => setSettings((s) => ({ ...s, tokenSaver: { rtk: true, caveman: true, ponytail: true } }))}>Aktifkan semua</button>
+                    <button className="btn ghost" onClick={() => setSettings((s) => ({ ...s, tokenSaver: { rtk: false, caveman: false, ponytail: false } }))}>Matikan semua</button>
+                  </div>
                 </div>
               )}
 

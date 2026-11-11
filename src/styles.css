@@ -416,3 +416,18 @@ pre.mono { margin: 0; white-space: pre-wrap; }
 .rating-row { display: flex; gap: 6px; }
 .rating { background: transparent; border: 1px solid #232a38; color: #4a5262; border-radius: 8px; font-size: 18px; padding: 2px 9px; }
 .rating.on { color: #ffca70; border-color: #4a3a12; background: #2a2010; }
+
+/* ===== Token Saver panel ===== */
+.ts-panel { display: flex; flex-direction: column; gap: 10px; }
+.ts-item { display: flex; align-items: flex-start; gap: 12px; background: #0d1119; border: 1px solid #1e2330; border-radius: 10px; padding: 11px 12px; }
+.ts-text { flex: 1; min-width: 0; }
+.ts-title { font-size: 13px; font-weight: 600; color: #e7e9ee; display: flex; align-items: center; gap: 7px; }
+.ts-badge { font-size: 10px; font-weight: 500; color: #ffb37a; background: #2a1a10; border: 1px solid #4a2a14; border-radius: 999px; padding: 1px 7px; }
+.ts-desc { font-size: 11.5px; color: #8f97a8; margin-top: 4px; line-height: 1.45; }
+.ts-note { font-size: 11.5px; color: #7fe0a8; background: #10201a; border: 1px solid #1d3b2c; border-radius: 8px; padding: 7px 10px; }
+.switch { position: relative; display: inline-block; width: 44px; height: 24px; flex: 0 0 auto; margin-top: 2px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .slider { position: absolute; inset: 0; cursor: pointer; background: #232a38; border-radius: 999px; transition: .15s; }
+.switch .slider:before { content: ''; position: absolute; height: 18px; width: 18px; left: 3px; top: 3px; background: #8f97a8; border-radius: 50%; transition: .15s; }
+.switch input:checked + .slider { background: #c2410c; }
+.switch input:checked + .slider:before { transform: translateX(20px); background: #fff; }

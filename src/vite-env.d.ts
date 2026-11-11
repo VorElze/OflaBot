@@ -72,6 +72,7 @@ interface DshApi {
   chat: (payload: any) => Promise<any>;
   appInfo: () => Promise<{ name: string; version: string; userData: string; donateUrl: string }>;
   files: { pick: (mode?: string) => Promise<{ ok?: boolean; files: any[]; error?: string }> };
+  clipboard: { image: () => Promise<{ ok: boolean; dataUrl?: string; width?: number; height?: number; note?: string; error?: string }> };
   sessionExport: (payload: { name?: string; content: string; format?: 'md' | 'json' | 'zip' }) => Promise<any>;
   feedback: (entry: any) => Promise<any>;
   openExternal: (url: string) => Promise<{ ok?: boolean; error?: string }>;

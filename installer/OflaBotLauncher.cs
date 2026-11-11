@@ -9,8 +9,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("OflaBot")]
 [assembly: AssemblyCompany("OflaBot")]
 [assembly: AssemblyDescription("OflaBot launcher")]
-[assembly: AssemblyVersion("0.2.5.0")]
-[assembly: AssemblyFileVersion("0.2.5.0")]
+[assembly: AssemblyVersion("0.2.6.0")]
+[assembly: AssemblyFileVersion("0.2.6.0")]
 
 // Launcher tipis: menjalankan OflaBot-core.exe (Electron) dengan argumen wajib
 // sehingga user bisa double-click OflaBot.exe langsung tanpa .bat / flag manual.
