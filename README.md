@@ -17,7 +17,7 @@
 
 ---
 
-## â¬‡ï¸ Download
+## ⬇️ Download
 
 Rilis siap pakai (installer Windows):
 **[github.com/VorElze/OflaBot/releases](https://github.com/VorElze/OflaBot/releases/latest)**
@@ -29,17 +29,17 @@ Rilis siap pakai (installer Windows):
 
 Verifikasi unduhan dengan file `.sha256` yang disertakan di halaman rilis.
 
-## âœ¨ Fitur
+## ✨ Fitur
 
 | Fitur | Keterangan |
 |---|---|
-| ðŸŒ **Browser tertanam** | Semua navigasi web terjadi **di dalam aplikasi** (bukan Edge/Chrome). Agent bisa membuka URL, membaca isi halaman, klik, isi form, dan screenshot halaman. |
+| 🌐 **Browser tertanam** | Semua navigasi web terjadi **di dalam aplikasi** (bukan Edge/Chrome). Agent bisa membuka URL, membaca isi halaman, klik, isi form, dan screenshot halaman. |
 | 🤖 **Agents** | `OflaBot`, `Web Agent`, `Desktop Agent`, `Coder`, `Researcher` — masing-masing punya set tool sendiri. |
-| ðŸ—‚ **Sessions** | Riwayat percakapan tersimpan otomatis, bisa dibuat/dipindah/dihapus. |
+| 🗂 **Sessions** | Riwayat percakapan tersimpan otomatis, bisa dibuat/dipindah/dihapus. |
 | 🧠 **Memory jangka panjang** | Agent menyimpan fakta & preferensi penting dan memakainya lagi di sesi berikutnya. |
-| ðŸŽ“ **Belajar skill otomatis** | Setelah sesi, agent merefleksikan percakapan dan menyimpan prosedur yang bisa dipakai ulang (gaya Hermes). Bisa dimatikan di Settings. |
-| ðŸ§© **Skill dari GitHub** | Pasang skill `SKILL.md` dari repo mana pun — kompatibel dengan skill Claude Code / Claude Desktop / Codex / OpenCode / Hermes / VS Code. Bisa juga impor dari folder lokal. |
-| ðŸ”€ **Dropdown model otomatis** | Daftar model dibaca langsung dari API provider — tidak perlu mengetik nama model. |
+| 🎓 **Belajar skill otomatis** | Setelah sesi, agent merefleksikan percakapan dan menyimpan prosedur yang bisa dipakai ulang (gaya Hermes). Bisa dimatikan di Settings. |
+| 🧩 **Skill dari GitHub** | Pasang skill `SKILL.md` dari repo mana pun — kompatibel dengan skill Claude Code / Claude Desktop / Codex / OpenCode / Hermes / VS Code. Bisa juga impor dari folder lokal. |
+| 🔀 **Dropdown model otomatis** | Daftar model dibaca langsung dari API provider — tidak perlu mengetik nama model. |
 | 🖥 **Kontrol desktop** | Jalankan perintah, buka aplikasi, mouse, keyboard, baca/tulis file (dengan konfirmasi untuk aksi berbahaya). |
 | ❤ **Donasi** | Menu dukungan langsung ke [Saweria](https://saweria.co/OflaCo). |
 
@@ -47,7 +47,7 @@ Verifikasi unduhan dengan file `.sha256` yang disertakan di halaman rilis.
 
 ![Antarmuka OflaBot](docs/screenshot-chat.png)
 
-## ðŸ”Œ Provider yang didukung
+## 🔌 Provider yang didukung
 
 | Provider | Protokol | Daftar model |
 |---|---|---|
@@ -61,7 +61,7 @@ Verifikasi unduhan dengan file `.sha256` yang disertakan di halaman rilis.
 Kalau provider tidak menyediakan endpoint daftar model, OflaBot memakai daftar
 cadangan dan tetap menyediakan mode **ketik manual**.
 
-## ðŸ“¦ Build sendiri
+## 📦 Build sendiri
 
 Prasyarat: **Node.js 20+** dan Windows 10/11.
 
@@ -87,7 +87,7 @@ Catatan build:
 - Aplikasi dijalankan dengan `--no-sandbox` (dibutuhkan Chromium di sebagian
   build Windows). Kalau menjalankan exe langsung, tambahkan flag itu.
 
-## ðŸ§© Contoh memasang skill dari GitHub
+## 🧩 Contoh memasang skill dari GitHub
 
 1. Buka panel **Skills** di sidebar.
 2. Tempel `owner/repo` atau `https://github.com/owner/repo` (boleh dengan
@@ -111,7 +111,7 @@ description: Kapan skill ini dipakai
 2. ...
 ```
 
-## ðŸ—‚ Struktur proyek
+## 🗂 Struktur proyek
 
 ```
 electron/main.ts     window, IPC provider, browser tertanam, memory, skills, model list
@@ -126,7 +126,7 @@ build/               ikon aplikasi
 build-exe.ps1        skrip build installer
 ```
 
-## ðŸ” Privasi & keamanan
+## 🔐 Privasi & keamanan
 
 - API key hanya disimpan lokal di profil aplikasi (`localStorage`), tidak
   dikirim ke mana pun selain provider yang Anda pilih.
@@ -144,26 +144,27 @@ Kalau OflaBot membantu pekerjaan Anda:
 
 [MIT](LICENSE)
 
-## ?? Mode akses (Full Access)
+## 🔓 Mode akses (Full Access)
 
-- Toolbar kanan: tombol **?? Normal / ?? Full Access** — klik untuk berganti.
-- **Settings ? Full Access** juga tersedia.
+- Toolbar kanan: tombol **🔓 Normal / 🔒 Full Access** — klik untuk berganti.
+- **Settings → Full Access** juga tersedia.
 - Mode Normal: dialog izin muncul sekali; klik **Allow** lalu semua aksi berikutnya
   di sesi itu otomatis diizinkan. Klik **Cancel** untuk menolak aksi tersebut.
 
-## ?? Uninstall menyeluruh
+## 🧹 Uninstall menyeluruh
 
-Jalankan `uninstall.cmd` di folder instalasi (atau Start Menu ? OflaBot ? Uninstall).
+Jalankan `uninstall.cmd` di folder instalasi (atau Start Menu → OflaBot → Uninstall).
 Yang dihapus: proses aplikasi, shortcut Desktop + Start Menu, entri registry,
 folder instalasi, serta cache/profil (`%APPDATA%\OflaBot`,
 `%APPDATA%\grokbot-desktop`, `%LOCALAPPDATA%\OflaBot`).
-## ?? Keandalan agent (v0.2.3)
+## 🛡 Keandalan agent (v0.2.3, diperkuat v0.2.7)
 
 Berdasarkan pembandingan dengan artefak OpenCode Desktop (`app.asar`: tool `todowrite`,
 kompaksi konteks, penanganan `tool-error`) dan perilaku agent GrokBot:
 
-- **Pengaman loop**: panggilan tool dengan nama+argumen sama ke-3× tidak dieksekusi;
-  agent diberi instruksi untuk mengubah pendekatan / bertanya. (Diuji dengan mock
+- **Pengaman loop**: panggilan tool dengan argumen sama (setelah dinormalisasi) tidak
+  dieksekusi ulang — hasil sebelumnya dipakai (cache), agent diberi instruksi untuk
+  mengubah pendekatan / bertanya. (Diuji dengan mock
   provider yang selalu memanggil tool sama: berhenti di 3 panggilan, lanjut jawaban final.)
 - **Retry provider** otomatis 3× untuk error transien (429/5xx/timeout).
 - **Respons kosong** tidak lagi menjadi bubble "(tanpa jawaban)" — muncul notifikasi jelas.
