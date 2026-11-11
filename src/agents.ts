@@ -109,7 +109,7 @@ export function getAgent(id: string): AgentDef {
   return AGENTS.find((a) => a.id === id) || AGENTS[0];
 }
 
-const browserTools = ['browser_open', 'browser_action', 'browser_snapshot', 'browser_text', 'browser_click', 'browser_fill'];
+const browserTools = ['browser_open', 'browser_action', 'browser_snapshot', 'browser_text', 'browser_click', 'browser_fill', 'browser_downloads', 'browser_pdf', 'browser_wait'];
 const desktopTools = [
   'screenshot', 'exec', 'launch', 'mouse', 'type', 'keys',
   'file_read', 'file_write', 'file_edit', 'file_list', 'file_glob', 'file_search',

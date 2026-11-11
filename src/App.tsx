@@ -180,7 +180,7 @@ function compressToolResult(name: string, result: any, full: string, aggressive 
       const sample = entries.slice(0, take).map((e) => (e.dir ? '[dir] ' : '') + (e.name || e.path));
       return JSON.stringify({
         ok: result.ok, base: result.base, count: result.count, truncated: result.truncated,
-        sample, note: entries.length > sample.length ? `${entries.length - sample.length} entri lain disembunyikan (gaya DSH: pakai pola/pattern untuk mempersempit)` : undefined,
+        sample, note: entries.length > sample.length ? `${entries.length - sample.length} entri lain disembunyikan (pakai pola/pattern untuk mempersempit)` : undefined,
       }).slice(0, MAX);
     }
 
@@ -298,10 +298,10 @@ const READ_ONLY_TOOLS = new Set([
   'web_search', 'spawn_subagents',
 ]);
 
-/**
- * Normalisasi argumen supaya panggilan yang "mirip" terdeteksi sebagai duplikat.
- * Contoh: C:\Foo\ vs c:\foo dan perbedaan "max" dianggap panggilan yang sama.
- */
+/** Aksi di browser yang MENGUBAH state halaman — dihitung sebagai kemajuan. */
+const BROWSER_ACTION_TOOLS = new Set([
+  'browser_open', 'browser_action', 'browser_click', 'browser_fill', 'browser_pdf', 'browser_wait',
+]);
 /**
  * Normalisasi perintah shell untuk deteksi duplikat. `dir /b C:\\`,
  * `dir C:\\ /b`, `cmd /c "dir C:\\ /b"`, dan `powershell -Command Get-ChildItem C:\\`
@@ -617,6 +617,7 @@ export default function App() {
   });
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
+  const [queue, setQueue] = useState<{ id: string; text: string }[]>([]);
   const [browserOpen, setBrowserOpen] = useState<boolean>(() => {
     try { return localStorage.getItem(BROWSER_OPEN_KEY) !== '0'; } catch { return true; }
   });
@@ -667,6 +668,7 @@ export default function App() {
   const abortRef = useRef(false);
   const pasteGuardRef = useRef(0);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const queueRef = useRef<{ id: string; text: string }[]>([]);
   const pickFilesRef = useRef<() => Promise<void>>(async () => { /* diisi di bawah */ });
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const browserSlotRef = useRef<HTMLDivElement | null>(null);
@@ -689,6 +691,20 @@ export default function App() {
     setNotice(text);
     window.setTimeout(() => setNotice((n) => (n === text ? '' : n)), 5000);
   }, []);
+
+  // Unduhan dari browser tertanam: tampilkan path-nya supaya pengguna bisa mengambil file.
+  useEffect(() => {
+    if (!hostReady || !window.dsh?.browser?.onDownload) return;
+    const off = window.dsh.browser.onDownload((d: any) => {
+      if (!d) return;
+      if (d.state === 'done') {
+        flash(`📥 File terunduh: ${d.filename} (${Math.max(1, Math.round((d.bytes || 0) / 1024))} KB) — ${d.path}`);
+      } else if (d.state === 'error') {
+        flash(`Gagal mengunduh: ${d.filename}`);
+      }
+    });
+    return off;
+  }, [flash, hostReady]);
 
   // Tanya pengguna dari dalam agent loop (gaya ask_user_question DSH).
   const askUserInline = useCallback((question: string, options?: string[]) => {
@@ -1214,10 +1230,10 @@ export default function App() {
     };
 
     let blockedRepeats = 0;
-    // ---- state "engine" (setara DSH/OpenCode) ----
+    // ---- state engine ----
     const toolCache = new Map<string, string>();   // hasil tool baca yang sudah pernah dijalankan
     let exploreStreak = 0;      // panggilan baca berturut-turut tanpa aksi nyata
-    let stallTotal = 0;         // total panggilan non-aksi dalam satu giliran
+    let wastedTotal = 0;        // panggilan sia-sia (duplikat/cache/error) — indikator stuck
     let timeoutStreak = 0;      // perintah yang timeout berturut-turut
     let forceFinal = false;     // paksa model menjawab dari data yang ada
     let finalAttempts = 0;      // percobaan minta jawaban teks sebelum ringkasan otomatis
@@ -1228,14 +1244,30 @@ export default function App() {
     const addMsg = (m: Msg) => { msgs.push(m); if (ctx !== msgs) ctx.push(m); };
 
     const markProgress = (name: string, args: any) => {
-      if (isMutatingCall(name, args)) { exploreStreak = 0; return; }
+      // Aksi yang mengubah state (tulis file, klik/isi browser, navigasi) = kemajuan.
+      if (isMutatingCall(name, args) || BROWSER_ACTION_TOOLS.has(name)) { exploreStreak = 0; return; }
       exploreStreak++;
-      stallTotal++;
     };
 
     while (!abortRef.current) {
       steps++;
       setLiveStep(steps);
+
+      // Antrian pesan pengguna (steer): suntikkan sebelum memanggil model lagi.
+      if (queueRef.current.length) {
+        const inbox = queueRef.current.splice(0, queueRef.current.length);
+        for (const q of inbox) {
+          addMsg({ role: 'user', content: q.text });
+          appendMessage(sessionId, { role: 'user', content: q.text });
+        }
+        setQueue([]);
+        systemPrompt +=
+          '\n\n[PESAN BARU DARI PENGGUNA SELAMA KAMU BEKERJA]\n' +
+          inbox.map((q) => '- ' + q.text).join('\n') +
+          '\nPerhatikan pesan ini dan sesuaikan arah pekerjaan. Jangan mengulang pekerjaan yang sudah selesai.';
+        exploreStreak = 0;
+        wastedTotal = 0;
+      }
 
       // Auto-compaction: konteks terlalu panjang -> ringkas riwayat lama.
       const comp = compactContext(ctx);
@@ -1243,7 +1275,7 @@ export default function App() {
         ctx = comp.msgs;
         if (!compactNoticeShown) {
           compactNoticeShown = true;
-          appendMessage(sessionId, { role: 'notice', content: 'Riwayat lama diringkas otomatis supaya model tetap fokus (hemat konteks, gaya DSH).' });
+          appendMessage(sessionId, { role: 'notice', content: 'Riwayat lama diringkas otomatis agar percakapan tetap ringkas dan hemat konteks.' });
         }
       }
 
@@ -1319,7 +1351,7 @@ export default function App() {
 
           if (seen >= 2) {
             blockedRepeats++;
-            markProgress(name, args);
+            wastedTotal++;
             if (toolCache.has(sig)) {
               pushToolResult({
                 cached: true,
@@ -1396,11 +1428,17 @@ export default function App() {
             result = { error: 'tool gagal: ' + (err?.message || String(err)) };
           }
 
-          // Pantau kemajuan: perintah baca (dir/Get-ChildItem/echo/dll) BUKAN aksi.
+          // Pantau kemajuan: baca saja tidak dihitung sebagai aksi, tapi bukan "gagal".
           markProgress(name, args);
-          if (name === 'ask_user') { exploreStreak = 0; stallTotal = 0; }
-          if (result?.timedOut) timeoutStreak++;
+          if (name === 'ask_user') { exploreStreak = 0; wastedTotal = 0; }
+          if (result?.error && !result?.cached) wastedTotal++;
+          if (result?.timedOut) { timeoutStreak++; wastedTotal += 2; }
           else timeoutStreak = 0;
+          // Unduhan browser yang berhasil = kemajuan nyata.
+          if (name === 'browser_downloads' || name === 'browser_click') {
+            const items = Array.isArray(result?.items) ? result.items : result?.downloaded ? [result.downloaded] : [];
+            if (items.some((d: any) => d && d.state === 'done')) { exploreStreak = 0; wastedTotal = 0; }
+          }
 
           if (name === 'todo_write') {
             todoSeen = true;
@@ -1434,29 +1472,30 @@ export default function App() {
             '\n\n[PENGINGAT SISTEM] Dua perintahmu timeout. JANGAN menjalankan pemindaian rekursif ' +
             '(Get-ChildItem -Recurse, dir /s). Periksa folder satu per satu dengan file_list, lalu ambil aksi.';
         }
-        if (!forceFinal && (exploreStreak >= 14 || stallTotal >= 30)) {
+        if (!forceFinal && (wastedTotal >= 12 || exploreStreak >= 30 || timeoutStreak >= 3)) {
           forceFinal = true;
           hitLimit = true;
           appendMessage(sessionId, {
             role: 'notice',
-            content: `OflaBot sudah ${stallTotal} kali hanya membaca/memeriksa tanpa mengubah apa pun, jadi saya minta ia menyimpulkan dari data yang sudah ada.`,
+            content:
+              'OflaBot berhenti karena beberapa langkah terakhir tidak membuahkan hasil baru ' +
+              `(${wastedTotal} langkah sia-sia). Saya minta ia merangkum apa yang sudah didapat.`,
           });
           ctx.push({
             role: 'user',
             content:
-              '[SISTEM] Batas pemeriksaan tercapai. JANGAN memanggil tool lagi. ' +
+              '[SISTEM] Beberapa langkah terakhir tidak menghasilkan kemajuan. JANGAN memanggil tool lagi. ' +
               'Tulis JAWABAN AKHIR sekarang: apa yang sudah dikerjakan, apa hasilnya, kendala/error yang muncul, dan langkah berikutnya. ' +
               'Bahasa Indonesia, ringkas, tanpa menyebut nama tool.',
           } as Msg);
-        } else if (!forceFinal && exploreStreak === 8) {
+        } else if (!forceFinal && exploreStreak === 16) {
           systemPrompt +=
-            '\n\n[PENGINGAT SISTEM] Kamu sudah membaca banyak data tanpa mengubah apa pun. ' +
-            'STOP membaca. Ambil aksi nyata sekarang (file_move/file_write/file_mkdir) sesuai rencana, ' +
-            'atau jawab pengguna dengan temuan yang ada beserta kendalanya.';
-        } else if (!forceFinal && exploreStreak === 11) {
+            '\n\n[PENGINGAT SISTEM] Kamu sudah cukup banyak membaca. Ambil aksi nyata berikutnya, ' +
+            'atau kalau sudah cukup data, langsung susun jawaban.';
+        } else if (!forceFinal && exploreStreak === 24) {
           systemPrompt +=
-            '\n\n[PENGINGAT SISTEM TERAKHIR] Batas eksplorasi habis. JANGAN memanggil tool baca lagi. ' +
-            'Lakukan aksi atau jawab pengguna sekarang juga.';
+            '\n\n[PENGINGAT SISTEM] Eksplorasi sudah sangat panjang. Prioritaskan menyelesaikan tugas ' +
+            '(aksi/kirim jawaban) daripada terus memeriksa.';
         }
         continue;
       }
@@ -1529,9 +1568,26 @@ export default function App() {
     } catch { /* abaikan */ } finally { setLearning(false); }
   }
 
+  // ---------------- antrian chat (steer saat agent bekerja) ----------------
+  const enqueueMessage = useCallback((text: string) => {
+    const item = { id: uid(), text };
+    queueRef.current = [...queueRef.current, item];
+    setQueue(queueRef.current.map((x) => ({ ...x })));
+  }, []);
+
+  const removeQueued = useCallback((id: string) => {
+    queueRef.current = queueRef.current.filter((x) => x.id !== id);
+    setQueue(queueRef.current.map((x) => ({ ...x })));
+  }, []);
+
+  const clearQueue = useCallback(() => {
+    queueRef.current = [];
+    setQueue([]);
+  }, []);
+
   async function send() {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || running || !active) return;
+    if ((!text && attachments.length === 0) || !active) return;
     if (!hostReady) return;
     const p = getProvider(settings.provider);
     if (!settings.apiKey && !p.noKey) { setPanel('settings'); flash('Isi API Key dulu.'); return; }
@@ -1554,6 +1610,15 @@ export default function App() {
         .join('\n\n');
     }
     if (!text && images.length) promptText = promptText || '(lihat gambar yang dilampirkan)';
+
+    // Sedang bekerja? Pesan masuk antrian dan disuntikkan di langkah berikutnya (steer).
+    if (running) {
+      enqueueMessage(promptText || '(pesan antrian)');
+      setInput('');
+      setAttachments([]);
+      flash('Pesan masuk antrian — akan dibaca OflaBot setelah langkah ini selesai.');
+      return;
+    }
 
     setInput('');
     setAttachments([]);
@@ -1791,6 +1856,19 @@ export default function App() {
                 </div>
               )}
 
+              {queue.length > 0 && (
+                <div className="queue-row">
+                  <span className="queue-label">⏳ Antrian</span>
+                  {queue.map((q) => (
+                    <span key={q.id} className="queue-chip" title={q.text}>
+                      {q.text.length > 60 ? q.text.slice(0, 60) + '…' : q.text}
+                      <button className="attach-x" title="Batalkan antrian" onClick={() => removeQueued(q.id)}>×</button>
+                    </span>
+                  ))}
+                  <button className="queue-clear" onClick={clearQueue}>hapus semua</button>
+                </div>
+              )}
+
               <div className="composer-main">
                 <div className="attach-wrap">
                   <button
@@ -1900,8 +1978,15 @@ export default function App() {
               </div>
 
               <div className="composer-actions">
-                <button className="btn primary" onClick={() => void send()} disabled={running}>Send</button>
-                <button className="btn" onClick={() => { abortRef.current = true; void window.dsh.execKill?.(); }} disabled={!running}>Stop</button>
+                <button
+                  className="btn primary"
+                  onClick={() => void send()}
+                  disabled={!input.trim() && attachments.length === 0}
+                  title={running ? 'Kirim ke antrian (dibaca setelah langkah ini)' : 'Kirim perintah'}
+                >
+                  {running ? 'Antrikan' : 'Send'}
+                </button>
+                <button className="btn" onClick={() => { abortRef.current = true; void window.dsh.execKill?.(); clearQueue(); }} disabled={!running}>Stop</button>
 
                 <button className="btn ghost" onClick={() => active && updateSession(active.id, (s) => ({ ...s, messages: [] }))}>Clear</button>
               </div>

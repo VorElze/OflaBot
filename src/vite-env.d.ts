@@ -24,6 +24,7 @@ interface DshBrowserApi {
   tool: (action: string, payload?: any) => Promise<any>;
   onState: (cb: (s: BrowserState) => void) => () => void;
   onRequestOpen: (cb: (p: { url: string }) => void) => () => void;
+  onDownload?: (cb: (p: { id: string; url: string; filename: string; path: string; state: string; bytes: number; at: number }) => void) => () => void;
   onError: (cb: (p: any) => void) => () => void;
 }
 

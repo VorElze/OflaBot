@@ -409,6 +409,69 @@ app.whenReady().then(() => {
           } catch (e: any) { console.log('TOOLS2_FAIL ' + (e?.message || String(e))); }
         }
 
+        // Uji antrian chat (steer) saat agent sedang bekerja.
+        if (process.env.OFLABOT_SMOKE_QUEUE) {
+          await win!.webContents.executeJavaScript(`(() => {
+            const settings = { provider: 'custom', baseUrl: 'http://127.0.0.1:18999', apiKey: 'mock', model: 'mock-slowmany', autoLearn: false, accessMode: 'full', permission: 'full', tokenSaver: { rtk: true, caveman: false, ponytail: false }, rules: [], webSearch: { provider: 'bing', apiKey: '', baseUrl: '' } };
+            localStorage.setItem('oflabot.settings.v1', JSON.stringify(settings));
+            localStorage.setItem('oflabot.sessions.v1', JSON.stringify([{ id: 'queue-test', title: 'queue test', agentId: 'oflabot', messages: [], createdAt: Date.now(), updatedAt: Date.now() }]));
+            localStorage.setItem('oflabot.active-session.v1', 'queue-test');
+            return true;
+          })()`);
+          await win!.webContents.reload();
+          await new Promise((r) => setTimeout(r, 2500));
+          await win!.webContents.executeJavaScript(`(() => {
+            const ta = document.querySelector('.composer textarea');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(ta, 'rapikan file di disk C');
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('.composer-actions .btn.primary').click();
+            return true;
+          })()`);
+          await new Promise((r) => setTimeout(r, 1200));
+          const queuedChip = await win!.webContents.executeJavaScript(`(() => {
+            const ta = document.querySelector('.composer textarea');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(ta, 'TAMBAHAN: fokus ke folder D saja');
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            const btn = document.querySelector('.composer-actions .btn.primary');
+            const label = btn ? btn.textContent : '';
+            if (btn) btn.click();
+            return { label, chipsAfterClick: document.querySelectorAll('.queue-chip').length, sendDisabled: btn ? btn.disabled : null };
+          })()`);
+          await new Promise((r) => setTimeout(r, Number(process.env.OFLABOT_SMOKE_QUEUE_WAIT || 22000)));
+          const queueInfo = await win!.webContents.executeJavaScript(`(() => {
+            const raw = JSON.parse(localStorage.getItem('oflabot.sessions.v1') || '[]');
+            const msgs = (raw[0] || {}).messages || [];
+            const users = msgs.filter((m) => m.role === 'user').map((m) => String(m.content).slice(0, 80));
+            return {
+              users,
+              queueLeft: document.querySelectorAll('.queue-chip').length,
+              running: (document.querySelector('.composer-actions .btn') || {}).textContent,
+              assistantLast: String((msgs.filter((m) => m.role === 'assistant' && !(m.tool_calls || []).length).slice(-1)[0] || {}).content || '').slice(0, 160),
+            };
+          })()`);
+          console.log('QUEUE_TEST ' + JSON.stringify({ ...queuedChip, ...queueInfo }));
+        }
+
+        // Uji browser: banyak aksi browser tidak boleh memicu berhenti prematur + simpan PDF.
+        if (process.env.OFLABOT_SMOKE_BROWSER2) {
+          try {
+            const r = await win!.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              out.open = await window.dsh.browser.tool('open', { url: 'https://example.com' });
+              out.text = await window.dsh.browser.tool('text');
+              out.wait = await window.dsh.browser.tool('wait', { ms: 300 });
+              out.pdf = await window.dsh.browser.tool('pdf', { dir: 'D:/DeepSeek/aplikasi/.tools/browsertest' });
+              out.downloads = await window.dsh.browser.tool('downloads');
+              return out;
+            })()`);
+            const dir = 'D:/DeepSeek/aplikasi/.tools/browsertest';
+            const pdfs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.pdf')) : [];
+            console.log('BROWSER2_TEST ' + JSON.stringify({ open: !!r.open?.ok, textLen: String(r.text?.text || '').length, wait: !!r.wait?.ok, pdf: r.pdf?.path || null, pdfBytes: r.pdf?.bytes || 0, pdfFiles: pdfs, downloadsOk: !!r.downloads?.ok, downloadDir: r.downloads?.dir }));
+          } catch (e: any) { console.log('BROWSER2_FAIL ' + (e?.message || String(e))); }
+        }
+
         // Uji Ctrl+V gambar: taruh PNG di clipboard OS, paste lewat webContents.paste().
         if (process.env.OFLABOT_SMOKE_PASTE) {
           try {
@@ -513,6 +576,11 @@ app.whenReady().then(() => {
             };
           })()`);
           console.log('ENGINE_TEST ' + JSON.stringify(engineInfo));
+          if (modelName.includes('browse')) {
+            const dir = 'D:/DeepSeek/aplikasi/.tools/browsertest';
+            const pdfs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.pdf')) : [];
+            console.log('BROWSE_ENGINE ' + JSON.stringify({ notices: engineInfo.notices, tools: engineInfo.tools, pdfs, lastAssistant: engineInfo.lastAssistant }));
+          }
           try {
             const stateRes = await net.fetch('http://127.0.0.1:18999/state');
             console.log('ENGINE_STATE ' + JSON.stringify(await stateRes.json()));
@@ -588,6 +656,41 @@ function emitBrowserState() {
   try { win?.webContents.send('browser:state', browserState()); } catch { /* window might be gone */ }
 }
 
+// ---- Pelacakan unduhan browser tertanam ----
+type DownloadRec = { id: string; url: string; filename: string; path: string; state: 'progress' | 'done' | 'error'; bytes: number; at: number };
+const browserDownloads: DownloadRec[] = [];
+let downloadSeq = 0;
+
+function setupBrowserDownloads(ses: any) {
+  if ((ses as any).__oflabotDownloadsHooked) return;
+  (ses as any).__oflabotDownloadsHooked = true;
+  ses.on('will-download', (_event: any, item: any) => {
+    const id = 'dl' + (++downloadSeq);
+    const suggested = String(item.getFilename() || 'download.bin').replace(/[\\/:*?"<>|]+/g, '-');
+    const dir = app.getPath('downloads');
+    let target = path.join(dir, suggested);
+    try {
+      const ext = path.extname(suggested);
+      const base = path.basename(suggested, ext);
+      let n = 1;
+      while (fs.existsSync(target)) target = path.join(dir, `${base} (${n++})${ext}`);
+    } catch { /* pakai default */ }
+    const rec: DownloadRec = { id, url: String(item.getURL()), filename: path.basename(target), path: target, state: 'progress', bytes: 0, at: Date.now() };
+    browserDownloads.unshift(rec);
+    if (browserDownloads.length > 50) browserDownloads.length = 50;
+    item.setSavePath(target);
+    item.on('updated', (_e: any, state: string) => {
+      if (state === 'progressing') rec.bytes = Number(item.getReceivedBytes() || 0);
+      try { win?.webContents.send('browser:download', { ...rec }); } catch { /* ignore */ }
+    });
+    item.once('done', (_e: any, state: string) => {
+      rec.state = state === 'completed' ? 'done' : 'error';
+      rec.bytes = Number(item.getReceivedBytes() || rec.bytes);
+      try { win?.webContents.send('browser:download', { ...rec }); } catch { /* ignore */ }
+    });
+  });
+}
+
 function ensureBrowserView(): WebContentsView {
   if (browserView) return browserView;
   if (!win) throw new Error('Main window belum siap');
@@ -606,6 +709,7 @@ function ensureBrowserView(): WebContentsView {
   win.contentView.addChildView(view);
 
   const wc = view.webContents;
+  try { setupBrowserDownloads(wc.session); } catch { /* ignore */ }
   // Popup/new tab: buka di view yang sama, jangan keluar aplikasi.
   wc.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) wc.loadURL(url);
@@ -1481,6 +1585,7 @@ ipcMain.handle('tool:browser', async (_e, action: string, payload: any = {}) => 
         return { ok: true, ...result };
       }
       case 'click': {
+        const beforeCount = browserDownloads.length;
         const result = await wc.executeJavaScript(
           `(() => {
              const sel = ${JSON.stringify(payload.selector || '')};
@@ -1498,7 +1603,44 @@ ipcMain.handle('tool:browser', async (_e, action: string, payload: any = {}) => 
            })()`,
           true,
         );
-        return { ok: true, ...result };
+        // Tunggu unduhan baru sebentar (mis. tombol Export) bila diminta.
+        const waitMs = Math.min(Math.max(Number(payload.waitDownloadMs) || 0, 0), 30000);
+        let downloaded: any = null;
+        if (waitMs > 0 && !(result as any)?.error) {
+          const startedAt = Date.now();
+          while (Date.now() - startedAt < waitMs) {
+            const fresh = browserDownloads.filter((d) => d.at >= startedAt - 3000);
+            const done = fresh.find((d) => d.state === 'done');
+            if (done) { downloaded = done; break; }
+            await new Promise((r) => setTimeout(r, 300));
+          }
+          if (!downloaded) {
+            const anyNew = browserDownloads.filter((d) => d.at >= startedAt - 3000);
+            if (anyNew.length) downloaded = { ...anyNew[0], pending: true };
+          }
+        }
+        return { ok: true, ...result, ...(downloaded ? { downloaded } : {}), ...(waitMs > 0 ? { waitedMs: waitMs } : {}) };
+      }
+      case 'downloads': {
+        return { ok: true, dir: app.getPath('downloads'), items: browserDownloads.slice(0, 20) };
+      }
+      case 'pdf': {
+        const data = await wc.printToPDF({ printBackground: true, pageSize: 'A4' });
+        const dir = String(payload.dir || app.getPath('downloads'));
+        await fsProm.mkdir(lp(dir), { recursive: true });
+        const title = String(wc.getTitle() || 'halaman').replace(/[\\/:*?"<>|]+/g, '-').trim().slice(0, 60) || 'halaman';
+        const file = path.join(dir, `${title}-${Date.now()}.pdf`);
+        await fsProm.writeFile(lp(file), data);
+        return { ok: true, path: file, bytes: data.length, url: wc.getURL(), title: wc.getTitle() };
+      }
+      case 'wait': {
+        const ms = Math.min(Math.max(Number(payload.ms) || 1000, 100), 30000);
+        await new Promise((r) => setTimeout(r, ms));
+        const result = await wc.executeJavaScript(
+          `(() => { const t = document.body ? document.body.innerText : ''; return { title: document.title, url: location.href, text: t.slice(0, 12000) }; })()`,
+          true,
+        );
+        return { ok: true, waited: ms, ...result };
       }
       case 'fill': {
         const result = await wc.executeJavaScript(

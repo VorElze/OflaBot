@@ -453,3 +453,9 @@ pre.mono { margin: 0; white-space: pre-wrap; }
 .rule-action.deny { background: #2a1214; color: #ff8a8a; border: 1px solid #4a1a1f; }
 .rule-action.ask { background: #2a2010; color: #ffca70; border: 1px solid #4a3a12; }
 .rule-action.allow { background: #10201a; color: #7fe0a8; border: 1px solid #1d3b2c; }
+
+/* ===== antrian chat (steer) ===== */
+.queue-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 2px 2px; }
+.queue-label { font-size: 10.5px; color: #ffca70; font-weight: 600; }
+.queue-chip { display: inline-flex; align-items: center; gap: 4px; background: #1d1a10; border: 1px solid #4a3a12; color: #e7d3a1; border-radius: 999px; padding: 2px 8px; font-size: 11px; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-clear { background: none; border: none; color: #7b8496; font-size: 10.5px; cursor: pointer; text-decoration: underline; }

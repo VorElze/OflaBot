@@ -39,12 +39,42 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'browser_click',
-      description: 'Klik elemen di halaman tertanam, berdasarkan CSS selector atau teks tombol/tautan.',
+      description:
+        'Klik elemen di halaman tertanam (CSS selector atau teks). Jika klik memicu unduhan (tombol Export/Unduh), ' +
+        'set waitDownloadMs (mis. 8000) agar hasilnya berisi path file yang terunduh.',
       parameters: {
         type: 'object',
-        properties: { selector: { type: 'string' }, text: { type: 'string' } },
+        properties: { selector: { type: 'string' }, text: { type: 'string' }, waitDownloadMs: { type: 'number' } },
         required: [],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_downloads',
+      description:
+        'Daftar file yang baru diunduh browser tertanam (nama, path, ukuran, status). Pakai ini untuk MEMVERIFIKASI ' +
+        'apakah tombol Export/Unduh benar-benar menghasilkan file, dan laporkan path-nya ke pengguna.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_pdf',
+      description:
+        'Simpan halaman yang sedang terbuka sebagai file PDF (print to PDF) ke folder Downloads. ' +
+        'Alternatif jika situs tidak punya tombol Export. Mengembalikan path file.',
+      parameters: { type: 'object', properties: { dir: { type: 'string' } }, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_wait',
+      description: 'Tunggu sebentar (ms) lalu baca ulang halaman. Pakai untuk menunggu halaman selesai dimuat / proses selesai.',
+      parameters: { type: 'object', properties: { ms: { type: 'number' } }, required: [] },
     },
   },
   {
@@ -423,6 +453,9 @@ export const BROWSER_TOOL_NAMES = [
   'browser_text',
   'browser_click',
   'browser_fill',
+  'browser_downloads',
+  'browser_pdf',
+  'browser_wait',
 ];
 
 export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write', 'file_list', 'file_stat'];
@@ -478,7 +511,10 @@ export async function runTool(name: string, args: any): Promise<any> {
     case 'browser_action': return b.tool(args.action);
     case 'browser_snapshot': return b.tool('snapshot');
     case 'browser_text': return b.tool('text');
-    case 'browser_click': return b.tool('click', { selector: args.selector, text: args.text });
+    case 'browser_click': return b.tool('click', { selector: args.selector, text: args.text, waitDownloadMs: args.waitDownloadMs });
+    case 'browser_downloads': return b.tool('downloads');
+    case 'browser_pdf': return b.tool('pdf', { dir: args.dir });
+    case 'browser_wait': return b.tool('wait', { ms: args.ms });
     case 'browser_fill': return b.tool('fill', { selector: args.selector, value: args.value });
     case 'screenshot': return window.dsh.screenshot();
     case 'exec': return window.dsh.exec(args.cmd, { timeoutMs: args.timeoutMs, cwd: args.cwd, shell: args.shell });

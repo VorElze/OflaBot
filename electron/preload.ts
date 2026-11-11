@@ -93,6 +93,11 @@ contextBridge.exposeInMainWorld('dsh', {
       ipcRenderer.on('browser:request-open', handler);
       return () => ipcRenderer.removeListener('browser:request-open', handler);
     },
+    onDownload: (cb: (p: any) => void) => {
+      const handler = (_e: any, p: any) => cb(p);
+      ipcRenderer.on('browser:download', handler);
+      return () => ipcRenderer.removeListener('browser:download', handler);
+    },
     onError: (cb: (p: any) => void) => {
       const handler = (_e: any, p: any) => cb(p);
       ipcRenderer.on('browser:error', handler);

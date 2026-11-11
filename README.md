@@ -308,6 +308,21 @@ terus tanpa pernah mengubah apa pun. Perbaikan:
 - **Sub-agent paralel** (`spawn_subagents`): pecah riset/pembacaan jadi maksimal 4 sub-agent yang jalan
   bersamaan, masing-masing konteks sendiri dan **hanya boleh membaca**; hasilnya digabung jadi satu kartu.
 
+## ⚡ Antrian chat & browser unduh (v0.3.1)
+
+- **Antrian / steer**: Anda bisa tetap mengetik dan menekan **Antrikan** saat OflaBot sedang bekerja.
+  Pesan disuntikkan di langkah berikutnya (tanpa menghentikan pekerjaan), muncul sebagai chip
+  "⏳ Antrian" di atas kotak pesan, dan bisa dibatalkan satu per satu atau "hapus semua".
+- **Pengaman berhenti lebih longgar & lebih pintar**: aksi browser (buka, klik, isi, tunggu, simpan PDF)
+  dihitung sebagai kemajuan; hanya langkah yang benar-benar sia-sia (duplikat/cache/error/timeout)
+  yang memicu berhenti. Batas eksplorasi naik (30 panggilan baca) dan peringatan dibuat bertahap,
+  jadi tugas seperti login + buka panel admin + klik Export tidak berhenti prematur.
+- **Unduhan browser dilacak**: file yang diunduh lewat browser tertanam disimpan ke folder Downloads,
+  muncul notifikasi path-nya, dan tool `browser_downloads` memungkinkan agent memverifikasi hasilnya.
+- **Simpan halaman sebagai PDF**: tool `browser_pdf` (print to PDF) — solusi saat situs tidak punya
+  tombol Export. Bisa juga `browser_wait` untuk menunggu halaman selesai dimuat.
+- **Teks notifikasi** tidak lagi menyebut merek/produk lain.
+
 ## Tempel screenshot
 
 Tekan **Ctrl+V** di kotak pesan untuk melampirkan screenshot dari clipboard
