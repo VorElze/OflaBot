@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+dist-electron/
+release/
+tsconfig.tsbuildinfo
+
+# caches & tooling lokal
+.npm-cache/
+.electron-cache/
+.eb-cache/
+.tools/
+.acl-recovery/
+.tmp/
+scripts/
+
+# installer artifacts (payload besar, dibangun ulang lewat build-exe.ps1)
+installer/payload.zip
+installer/Setup.exe
+installer/Setup2.exe
+
+# file sementara / uji
+.ud-*/
+*.log
+*.tmp
+.smoke*.png
+.ud*.png
