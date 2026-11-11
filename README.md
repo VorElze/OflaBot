@@ -244,6 +244,38 @@ Menu sidebar **⚡ Token Saver** — fitur hemat token yang bisa dinyalakan/dima
 | **Compress LLM output** (Caveman) | model menjawab gaya telegrafis, token output hemat |
 | **Lazy senior dev** (Ponytail) | bias solusi minimal: YAGNI, reuse library, hapus > menambah |
 
+## 🧰 Tool & engine lengkap (v0.2.9)
+
+Paritas tool inti dengan DSH/OpenCode Desktop:
+
+| Tool | Fungsi |
+|---|---|
+| `file_list` / `file_glob` | daftar folder & cari file dengan pola (`**/*.pdf`) |
+| `file_search` | cari **teks di dalam file** (grep): path + nomor baris |
+| `file_read` | baca dengan nomor baris + `offset`/`limit` (file besar bertahap) |
+| `file_edit` | ganti teks persis (`oldText` → `newText`) tanpa menimpa seluruh file |
+| `file_write` / `file_mkdir` | tulis file & buat folder (auto parent) |
+| `file_move` / `file_copy` | pindah/salin file & folder (rekursif, verifikasi ukuran) |
+| `file_delete` | hapus file/folder permanen (dengan pengaman path sistem) |
+| `ask_user` | **tanya pengguna & tunggu jawaban** (modal) saat ambigu/stuck |
+| `session_log` | baca log sesi sendiri untuk laporan/progres |
+| `exec` | cmd **atau** powershell, timeout, output panjang disimpan ke file |
+
+Perbaikan penting:
+
+- **Path > 260 karakter** (long path) kini didukung (`\\?\`) untuk baca/tulis/pindah.
+- **Pindah file gagal ENOENT** kini dijelaskan: "sumber tidak ada (mungkin sudah dipindahkan)"
+  + hint, bukan error rename yang membingungkan. Copy/move memverifikasi ukuran sebelum
+  menghapus sumber, dan fallback copy+delete untuk beda drive/izin.
+- **Output terminal besar** tidak lagi hilang: dipotong di layar, teks penuh disimpan di
+  `userdata/tool-output/*.txt` + path-nya diberitahukan ke model.
+- **Paksa jawab lebih pintar**: kalau model tetap memaksa tool / menjawab kosong, OflaBot
+  memberi instruksi teks satu kali lagi, lalu membuat **ringkasan kerja otomatis**
+  (aksi nyata, file diproses, kendala, todo yang belum selesai) — bukan "Model berhenti
+  tanpa kesimpulan" tanpa isi.
+
+
+
 ## 🚦 Anti putar-putar (v0.2.8)
 
 Dari log sesi nyata: 98× `exec` (76 perintah unik, 22 error sintaks, 0× `file_move`) — bot memeriksa

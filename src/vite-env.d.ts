@@ -80,13 +80,18 @@ interface DshApi {
   memory: DshMemoryApi;
   skills: DshSkillsApi;
   screenshot: () => Promise<{ dataUrl?: string; error?: string }>;
-  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => Promise<any>;
+  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string; shell?: string }) => Promise<any>;
   execKill?: () => Promise<any>;
   fs: {
-    list: (dir: string, opts?: { pattern?: string; max?: number }) => Promise<any>;
+    list: (dir: string, opts?: { pattern?: string; max?: number; depth?: number }) => Promise<any>;
     mkdir: (dir: string) => Promise<any>;
     move: (src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }) => Promise<any>;
-    read: (file: string, maxBytes?: number) => Promise<any>;
+    copy: (src: string, dest: string, opts?: { overwrite?: boolean }) => Promise<any>;
+    delete: (target: string, opts?: { recursive?: boolean }) => Promise<any>;
+    read: (file: string, opts?: { offset?: number; limit?: number; maxBytes?: number; withLineNumbers?: boolean }) => Promise<any>;
+    edit: (file: string, opts?: { oldText?: string; newText?: string; replaceAll?: boolean }) => Promise<any>;
+    glob: (dir: string, opts?: { pattern?: string; max?: number; depth?: number }) => Promise<any>;
+    search: (dir: string, opts?: { query?: string; pattern?: string; max?: number; ignoreCase?: boolean; regex?: boolean; depth?: number }) => Promise<any>;
   };
   launch: (exe: string, args?: string[]) => Promise<any>;
   keys: (keys: string) => Promise<any>;

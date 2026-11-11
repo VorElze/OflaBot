@@ -15,18 +15,19 @@ const WORK_RULES =
   '1) Untuk tugas lebih dari 2 langkah, kamu WAJIB membuat daftar langkah sendiri dengan todo_write SEBELUM memanggil tool lain — tanpa perlu diminta pengguna. ' +
   'Pengguna awam tidak tahu tool; jangan pernah menyuruh pengguna mengetik nama tool. ' +
   'Buat 3-6 langkah yang mudah dipahami orang awam (mis. "Lihat isi folder", "Kelompokkan per jenis file"), lalu perbarui status (pending/in_progress/completed) setiap langkah selesai. ' +
-  '2) Operasi file WAJIB pakai tool native: file_list (daftar/pola), file_stat (baca), file_move (pindah/copy, otomatis buat folder), file_mkdir. ' +
-  'JANGAN pakai shell "dir", "move", "copy", "mkdir" berulang-ulang — itu penyebab loop. ' +
+  '2) Operasi file WAJIB pakai tool native: file_list/file_glob (daftar/pola), file_search (cari teks di file), file_read (baca + nomor baris), file_edit (ganti sebagian teks), file_write (tulis file), file_move/file_copy/file_delete, file_mkdir. ' +
+  'JANGAN pakai shell "dir", "move", "copy", "del", "mkdir" berulang-ulang — itu penyebab loop. ' +
   '3) exec hanya untuk hal yang tidak ada tool-nya; beri timeoutMs dan cwd bila perlu, dan pecah perintah besar menjadi langkah kecil. ' +
   '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 1×; hasilnya sudah ada di konteks. ' +
   '5) HEMAT LANGKAH: maksimal 5 panggilan baca (file_list/file_stat/browser_text/dll) sebelum kamu WAJIB mengambil aksi nyata. ' +
   'Jangan menjelajahi folder yang tidak berhubungan dengan tugas. Untuk tugas memindahkan file: daftar 1-2 folder sumber, lalu LANGSUNG file_move. ' +
-  '6) JANGAN pakai exec untuk melihat daftar file ("dir", "Get-ChildItem", "tree", "ls"); gunakan file_list. exec hanya untuk build/menjalankan aplikasi. ' +
+  '6) JANGAN pakai exec untuk melihat daftar file ("dir", "Get-ChildItem", "tree", "ls"); gunakan file_list/file_glob. exec hanya untuk build/menjalankan aplikasi. ' +
   '7) JANGAN memindai seluruh disk secara rekursif ("Get-ChildItem -Recurse C:\\", "dir /s"). Periksa folder relevan satu per satu, lalu langsung file_move. ' +
   '8) JANGAN memindahkan/menghapus file sistem: C:\\Windows, C:\\Program Files, C:\\ProgramData, AppData, Recovery, System Volume Information — itu bisa merusak Windows. ' +
   'Jika pengguna memintanya, jelaskan risikonya dan minta konfirmasi eksplisit lebih dulu. ' +
-  '9) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
-  '10) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
+  '9) Jika bingung/ambigu atau butuh keputusan pengguna (mis. file mana yang dimaksud), panggil ask_user dan tunggu jawabannya — JANGAN menebak berulang-ulang. ' +
+  '10) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
+  '11) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
 
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +
@@ -106,7 +107,11 @@ export function getAgent(id: string): AgentDef {
 }
 
 const browserTools = ['browser_open', 'browser_action', 'browser_snapshot', 'browser_text', 'browser_click', 'browser_fill'];
-const desktopTools = ['screenshot', 'exec', 'launch', 'mouse', 'type', 'keys', 'file_read', 'file_write', 'file_list', 'file_move', 'file_mkdir', 'file_stat', 'todo_write'];
+const desktopTools = [
+  'screenshot', 'exec', 'launch', 'mouse', 'type', 'keys',
+  'file_read', 'file_write', 'file_edit', 'file_list', 'file_glob', 'file_search',
+  'file_move', 'file_copy', 'file_delete', 'file_mkdir', 'file_stat', 'todo_write', 'ask_user',
+];
 const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write'];
 
 // Tool yang tersedia per tipe agent (memory selalu tersedia).

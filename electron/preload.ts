@@ -47,13 +47,18 @@ contextBridge.exposeInMainWorld('dsh', {
 
   // --- desktop tools ---
   screenshot: () => ipcRenderer.invoke('tool:screenshot'),
-  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => ipcRenderer.invoke('tool:exec', cmd, opts),
+  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string; shell?: string }) => ipcRenderer.invoke('tool:exec', cmd, opts),
   execKill: () => ipcRenderer.invoke('tool:kill'),
   fs: {
     list: (dir: string, opts?: any) => ipcRenderer.invoke('fs:list', dir, opts),
     mkdir: (dir: string) => ipcRenderer.invoke('fs:mkdir', dir),
     move: (src: string, dest: string, opts?: any) => ipcRenderer.invoke('fs:move', src, dest, opts),
-    read: (file: string, maxBytes?: number) => ipcRenderer.invoke('fs:read', file, maxBytes),
+    copy: (src: string, dest: string, opts?: any) => ipcRenderer.invoke('fs:copy', src, dest, opts),
+    delete: (target: string, opts?: any) => ipcRenderer.invoke('fs:delete', target, opts),
+    read: (file: string, opts?: any) => ipcRenderer.invoke('fs:read', file, opts),
+    edit: (file: string, opts?: any) => ipcRenderer.invoke('fs:edit', file, opts),
+    glob: (dir: string, opts?: any) => ipcRenderer.invoke('fs:glob', dir, opts),
+    search: (dir: string, opts?: any) => ipcRenderer.invoke('fs:search', dir, opts),
   },
   launch: (exe: string, args?: string[]) => ipcRenderer.invoke('tool:launch', exe, args),
   keys: (keys: string) => ipcRenderer.invoke('tool:keys', keys),

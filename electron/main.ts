@@ -352,6 +352,32 @@ app.whenReady().then(() => {
           console.log('LOOP_TEST ' + JSON.stringify(loopInfo));
         }
 
+        // Uji filesystem: sumber hilang, long path, copy/delete.
+        if (process.env.OFLABOT_SMOKE_FS) {
+          try {
+            const r = await win!.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              out.miss = await window.dsh.fs.move('D:/DeepSeek/aplikasi/.tools/tidak-ada-xyz.txt', 'D:/DeepSeek/aplikasi/.tools/tujuan.txt');
+              const dir = 'D:/DeepSeek/aplikasi/.tools/fstest';
+              await window.dsh.fs.mkdir(dir);
+              out.write = await window.dsh.fileWrite(dir + '/a.txt', 'halo');
+              out.read = await window.dsh.fs.read(dir + '/a.txt', { withLineNumbers: true });
+              out.edit = await window.dsh.fs.edit(dir + '/a.txt', { oldText: 'halo', newText: 'halo dunia' });
+              out.copy = await window.dsh.fs.copy(dir + '/a.txt', dir + '/b.txt');
+              out.del = await window.dsh.fs.delete(dir + '/b.txt');
+              out.readBack = await window.dsh.fs.read(dir + '/a.txt');
+              // long path (~280 char)
+              const longName = 'x'.repeat(120);
+              const longPath = dir + '/' + longName + '/' + longName + '/deep.txt';
+              out.longWrite = await window.dsh.fileWrite(longPath, 'dalam');
+              out.longRead = await window.dsh.fs.read(longPath);
+              await window.dsh.fs.delete(dir, { recursive: true });
+              return out;
+            })()`);
+            console.log('FS_TEST ' + JSON.stringify(r));
+          } catch (e: any) { console.log('FS_FAIL ' + (e?.message || String(e))); }
+        }
+
         // Uji Ctrl+V gambar: taruh PNG di clipboard OS, paste lewat webContents.paste().
         if (process.env.OFLABOT_SMOKE_PASTE) {
           try {
@@ -414,6 +440,23 @@ app.whenReady().then(() => {
             document.querySelector('.composer-actions .btn.primary').click();
             return true;
           })()`);
+          // Uji ask_user: jawab modal yang muncul dari agent.
+          if (modelName.includes('ask')) {
+            for (let i = 0; i < 24; i++) {
+              await new Promise((r) => setTimeout(r, 500));
+              const handled = await win!.webContents.executeJavaScript(`(() => {
+                const inp = document.querySelector('.ask-input');
+                if (!inp) return false;
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(inp, 'Ya, lanjutkan');
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                const btn = document.querySelector('.modal .btn.primary');
+                if (btn) btn.click();
+                return true;
+              })()`);
+              if (handled) break;
+            }
+          }
           await new Promise((r) => setTimeout(r, Number(process.env.OFLABOT_SMOKE_ENGINE_WAIT || 22000)));
           const engineInfo = await win!.webContents.executeJavaScript(`(() => {
             const raw = JSON.parse(localStorage.getItem('oflabot.sessions.v1') || '[]');
@@ -435,6 +478,7 @@ app.whenReady().then(() => {
               targets: document.querySelectorAll('.attach-row .attach-chip').length,
               sessionLogTools: toolMsgs.filter((m) => String(m.content || '').includes('total_events')).length,
               sessionLogPreview: String((toolMsgs.find((m) => String(m.content || '').includes('total_events')) || {}).content || '').slice(0, 360),
+              toolEcho: toolMsgs.slice(-8).map((m) => ({ name: m.name, content: String(m.content || '').slice(0, 320) })),
             };
           })()`);
           console.log('ENGINE_TEST ' + JSON.stringify(engineInfo));
@@ -745,14 +789,47 @@ function killRunningToolProcs() {
 ipcMain.handle('tool:kill', async () => { killRunningToolProcs(); return { ok: true }; });
 
 // ---- Run shell command ----
-ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => {
+ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number; cwd?: string; shell?: string }) => {
   const timeoutMs = Math.min(Math.max(opts?.timeoutMs ?? 120000, 1000), 600000);
-  const MAX_OUT = 200_000;
+  const MAX_STREAM = 2_000_000;   // batas pengaman memori
+  const INLINE_BYTES = 40_000;    // yang dikirim ke model; sisanya disimpan ke file
+  const shell = String(opts?.shell || 'cmd').toLowerCase();
+  const file: [string, string[]] = shell === 'powershell' || shell === 'pwsh'
+    ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd]]
+    : ['cmd.exe', ['/d', '/s', '/c', cmd]];
+
+  const spill = async (text: string, kind: string): Promise<{ text: string; outputPath?: string }> => {
+    if (text.length <= INLINE_BYTES) return { text };
+    try {
+      const dir = path.join(app.getPath('userData'), 'tool-output');
+      await fsProm.mkdir(lp(dir), { recursive: true });
+      const outPath = path.join(dir, `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
+      await fsProm.writeFile(lp(outPath), text, 'utf8');
+      return { text: text.slice(0, INLINE_BYTES), outputPath: outPath };
+    } catch {
+      return { text: text.slice(0, INLINE_BYTES) };
+    }
+  };
+
+  const finish = async (payload: any): Promise<any> => {
+    const s = await spill(String(payload.stdout ?? ''), 'stdout');
+    const e = await spill(String(payload.stderr ?? ''), 'stderr');
+    const out: any = { code: payload.code, stdout: s.text, stderr: e.text, truncated: payload.truncated || !!s.outputPath || !!e.outputPath };
+    if (payload.timedOut) out.timedOut = true;
+    if (payload.error) out.error = payload.error;
+    if (payload.note) out.note = payload.note;
+    if (s.outputPath || e.outputPath) {
+      out.outputPath = s.outputPath || e.outputPath;
+      out.note = `Output panjang dipotong di layar; teks lengkap disimpan di: ${out.outputPath}. Baca dengan file_read (offset/limit) jika perlu.`;
+    }
+    return out;
+  };
+
   return new Promise((resolve) => {
     let finished = false;
-    const done = (payload: any) => { if (!finished) { finished = true; resolve(payload); } };
+    const done = (payload: any) => { if (!finished) { finished = true; void finish(payload).then(resolve); } };
     try {
-      const p = spawn('cmd.exe', ['/c', cmd], {
+      const p = spawn(file[0], file[1] as string[], {
         shell: false,
         cwd: opts?.cwd || undefined,
         windowsHide: true,
@@ -760,8 +837,8 @@ ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number;
       runningToolProcs.add(p);
       let out = '', err = '';
       let truncated = false;
-      p.stdout.on('data', (d) => { out += d; if (out.length > MAX_OUT) { out = out.slice(0, MAX_OUT); truncated = true; } });
-      p.stderr.on('data', (d) => { err += d; if (err.length > MAX_OUT) { err = err.slice(0, MAX_OUT); truncated = true; } });
+      p.stdout.on('data', (d) => { out += d; if (out.length > MAX_STREAM) { out = out.slice(0, MAX_STREAM); truncated = true; } });
+      p.stderr.on('data', (d) => { err += d; if (err.length > MAX_STREAM) { err = err.slice(0, MAX_STREAM); truncated = true; } });
       p.on('error', (e: any) => { runningToolProcs.delete(p); done({ code: -1, stdout: out, stderr: (err + '\n' + (e?.message || String(e))).trim(), error: e?.message || String(e) }); });
       p.on('close', (code) => { runningToolProcs.delete(p); done({ code, stdout: out, stderr: err, truncated }); });
       setTimeout(() => {
@@ -778,24 +855,85 @@ ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number;
 });
 
 // ===========================================================================
-// Tool file-system native (menggantikan pola shell loop; seperti read/glob/move
-// di OpenCode) — lebih aman dan hemat langkah.
+// Tool file-system native (paritas DSH/OpenCode: list, glob, search, read,
+// write, edit, mkdir, copy, move, delete). Windows long-path aware.
 // ===========================================================================
-ipcMain.handle('fs:list', async (_e, dir: string, opts?: { pattern?: string; max?: number }) => {
-  const fsP = await import('fs/promises');
+const fsProm = fs.promises;
+
+/** Prefix \\?\ agar path > 260 karakter tetap bisa diakses di Windows. */
+function lp(p: string): string {
+  if (process.platform !== 'win32') return path.resolve(p);
+  const abs = path.resolve(p);
+  if (/^\\\\\?\\/.test(abs)) return abs;
+  if (/^\\\\/.test(abs)) return '\\\\?\\UNC\\' + abs.slice(2);
+  return '\\\\?\\' + abs;
+}
+
+async function statSafe(p: string) {
+  try { return await fsProm.stat(lp(p)); } catch { return null; }
+}
+
+async function copyRecursive(src: string, dst: string): Promise<void> {
+  const st = await fsProm.stat(lp(src));
+  if (st.isDirectory()) {
+    await fsProm.mkdir(lp(dst), { recursive: true });
+    const entries = await fsProm.readdir(lp(src), { withFileTypes: true });
+    for (const ent of entries) await copyRecursive(path.join(src, ent.name), path.join(dst, ent.name));
+    return;
+  }
+  await fsProm.mkdir(lp(path.dirname(dst)), { recursive: true });
+  await fsProm.copyFile(lp(src), lp(dst));
+}
+
+function globToRegex(glob: string): RegExp {
+  const g = glob.replace(/\\/g, '/');
+  let rx = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') { rx += '.*'; i++; if (g[i + 1] === '/') i++; }
+      else rx += '[^/]*';
+    } else if (c === '?') rx += '[^/]';
+    else if ('.+^${}()|[]'.includes(c)) rx += '\\' + c;
+    else rx += c;
+  }
+  return new RegExp('^' + rx + '$', 'i');
+}
+
+async function walkDir(root: string, depthLimit: number, onFile: (full: string, name: string, rel: string) => Promise<boolean> | boolean): Promise<void> {
+  const base = path.resolve(root);
+  async function walk(cur: string, depth: number) {
+    if (depth > depthLimit) return;
+    let entries: any[] = [];
+    try { entries = await fsProm.readdir(lp(cur), { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const full = path.join(cur, ent.name);
+      const rel = path.relative(base, full).replace(/\\/g, '/');
+      if (ent.isDirectory()) await walk(full, depth + 1);
+      else {
+        const stop = await onFile(full, ent.name, rel);
+        if (stop) return;
+      }
+    }
+  }
+  await walk(base, 0);
+}
+
+ipcMain.handle('fs:list', async (_e, dir: string, opts?: { pattern?: string; max?: number; depth?: number }) => {
   try {
     const target = dir || process.cwd();
-    const max = Math.min(opts?.max ?? 500, 5000);
+    const max = Math.min(opts?.max ?? 1000, 5000);
+    const depthLimit = Math.min(Math.max(opts?.depth ?? 3, 0), 12);
     const out: any[] = [];
     async function walk(cur: string, depth: number) {
-      if (out.length >= max || depth > 3) return;
+      if (out.length >= max || depth > depthLimit) return;
       let entries: any[] = [];
-      try { entries = await fsP.readdir(cur, { withFileTypes: true }); } catch { return; }
+      try { entries = await fsProm.readdir(lp(cur), { withFileTypes: true }); } catch { return; }
       for (const ent of entries) {
         if (out.length >= max) return;
         const full = path.join(cur, ent.name);
         let size = 0;
-        try { if (ent.isFile()) size = (await fsP.stat(full)).size; } catch { /* ignore */ }
+        try { if (ent.isFile()) size = (await fsProm.stat(lp(full))).size; } catch { /* ignore */ }
         out.push({ path: full, name: ent.name, dir: ent.isDirectory(), size });
         if (ent.isDirectory()) await walk(full, depth + 1);
       }
@@ -814,69 +952,210 @@ ipcMain.handle('fs:list', async (_e, dir: string, opts?: { pattern?: string; max
   }
 });
 
-ipcMain.handle('fs:mkdir', async (_e, dir: string) => {
-  const fsP = await import('fs/promises');
+ipcMain.handle('fs:glob', async (_e, dir: string, opts?: { pattern?: string; max?: number; depth?: number }) => {
   try {
-    await fsP.mkdir(dir, { recursive: true });
+    const target = dir || process.cwd();
+    const pattern = (opts?.pattern || '*').trim();
+    const max = Math.min(opts?.max ?? 300, 2000);
+    const depthLimit = Math.min(Math.max(opts?.depth ?? 8, 0), 20);
+    const rx = globToRegex(pattern);
+    const matches: any[] = [];
+    await walkDir(target, depthLimit, (full, name, rel) => {
+      if (matches.length >= max) return true;
+      if (rx.test(rel) || rx.test(name)) {
+        let size = 0;
+        try { size = fs.statSync(lp(full)).size; } catch { /* ignore */ }
+        matches.push({ path: full, rel, name, size });
+      }
+      return false;
+    });
+    return { ok: true, base: path.resolve(target), pattern, count: matches.length, truncated: matches.length >= max, matches };
+  } catch (e: any) { return { error: e?.message || String(e) }; }
+});
+
+ipcMain.handle('fs:search', async (_e, dir: string, opts?: { query?: string; pattern?: string; max?: number; ignoreCase?: boolean; regex?: boolean; depth?: number }) => {
+  try {
+    const target = dir || process.cwd();
+    const q = String(opts?.query || '');
+    if (!q) return { error: 'query kosong' };
+    const max = Math.min(opts?.max ?? 100, 1000);
+    const depthLimit = Math.min(Math.max(opts?.depth ?? 8, 0), 20);
+    const ic = opts?.ignoreCase !== false;
+    let matcher: (line: string) => boolean;
+    if (opts?.regex) {
+      const rx = new RegExp(q, ic ? 'i' : '');
+      matcher = (line) => rx.test(line);
+    } else {
+      const needle = ic ? q.toLowerCase() : q;
+      matcher = (line) => (ic ? line.toLowerCase() : line).includes(needle);
+    }
+    const nameRx = new RegExp('^' + (opts?.pattern || '*.*').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+    const matches: any[] = [];
+    let scanned = 0, skippedBinary = 0;
+    await walkDir(target, depthLimit, async (full, name) => {
+      if (matches.length >= max) return true;
+      if (!nameRx.test(name)) return false;
+      let st: any = null;
+      try { st = await fsProm.stat(lp(full)); } catch { return false; }
+      if (!st || st.size > 3_000_000) return false;
+      scanned++;
+      let buf: Buffer;
+      try { buf = await fsProm.readFile(lp(full)); } catch { return false; }
+      if (buf.subarray(0, 2000).includes(0)) { skippedBinary++; return false; }
+      const lines = buf.toString('utf8').split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        if (matcher(lines[i])) {
+          matches.push({ path: full, line: i + 1, text: lines[i].slice(0, 300) });
+          if (matches.length >= max) return true;
+        }
+      }
+      return false;
+    });
+    return { ok: true, base: path.resolve(target), query: q, count: matches.length, scanned, skippedBinary, truncated: matches.length >= max, matches };
+  } catch (e: any) { return { error: e?.message || String(e) }; }
+});
+
+ipcMain.handle('fs:mkdir', async (_e, dir: string) => {
+  try {
+    await fsProm.mkdir(lp(dir), { recursive: true });
     return { ok: true, dir };
   } catch (e: any) { return { error: e?.message || String(e) }; }
 });
 
-ipcMain.handle('fs:move', async (_e, src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }) => {
-  const fsP = await import('fs/promises');
+// Inti copy/move: rename -> fallback copy+verifikasi+hapus; long path aware.
+async function moveItem(src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }): Promise<any> {
+  const s = path.resolve(src);
+  const d = path.resolve(dest);
+  if (s === d) return { ok: true, note: 'sumber = tujuan' };
+  const srcStat = await statSafe(s);
+  if (!srcStat) {
+    return {
+      error: `sumber tidak ada: ${s}`,
+      code: 'ENOENT', srcExists: false,
+      hint: 'File mungkin sudah dipindahkan/dihapus sebelumnya. Cek ulang dengan file_list sebelum mengulang.',
+    };
+  }
+  await fsProm.mkdir(lp(path.dirname(d)), { recursive: true });
+  const dstStat = await statSafe(d);
+  if (dstStat && !opts?.overwrite) return { error: 'tujuan sudah ada: ' + d, hint: 'set overwrite=true atau ganti nama tujuan', code: 'EEXIST' };
+  if (dstStat && opts?.overwrite) {
+    if (dstStat.isDirectory() && !srcStat.isDirectory()) return { error: 'tujuan adalah folder, sumber file: ' + d };
+    await fsProm.rm(lp(d), { recursive: true, force: true }).catch(() => { /* ignore */ });
+  }
+
+  if (opts?.copy) {
+    await copyRecursive(s, d);
+    const ok = await statSafe(d);
+    if (!ok) return { error: 'copy gagal: tujuan tidak ditemukan setelah copy' };
+    return { ok: true, from: s, to: d, copy: true, method: 'copy', verified: true };
+  }
+
   try {
-    const s = path.resolve(src);
-    const d = path.resolve(dest);
-    if (s === d) return { ok: true, note: 'sumber = tujuan' };
-    await fsP.mkdir(path.dirname(d), { recursive: true });
-    const exists = await fsP.stat(d).then(() => true).catch(() => false);
-    if (exists && !opts?.overwrite) return { error: 'tujuan sudah ada: ' + d, hint: 'set overwrite=true atau ganti nama tujuan' };
-
-    if (opts?.copy) {
-      // Mode copy: sumber tetap ada (memang duplikat).
-      await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
-      return { ok: true, from: s, to: d, copy: true };
-    }
-
-    // Mode MOVE: rename dulu (cepat, satu volume). Jika beda drive (EXDEV),
-    // fallback: copy -> verifikasi -> hapus sumber. Tanpa ini file tertinggal
-    // di sumber sehingga terlihat "dobel".
-    let method = 'rename';
-    const forceFallback = !!(opts as any)?.__forceFallback;
+    await fsProm.rename(lp(s), lp(d));
+    return { ok: true, from: s, to: d, copy: false, method: 'rename', verified: true };
+  } catch (err: any) {
+    const code = String(err?.code || '');
+    const retriable = ['EXDEV', 'EPERM', 'EACCES', 'ENOENT', 'ENOTSUP', 'EISDIR'].includes(code);
+    if (!retriable) return { error: e2(err), code };
     try {
-      if (forceFallback) throw Object.assign(new Error('forced EXDEV'), { code: 'EXDEV' });
-      await fsP.rename(s, d);
-    } catch (err: any) {
-      const code = String(err?.code || '');
-      if (code !== 'EXDEV' && code !== 'EPERM' && code !== 'EACCES') throw err;
-      method = 'copy+delete';
-      await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
-      const [srcStat, dstStat] = await Promise.all([fsP.stat(s), fsP.stat(d)]);
-      if (srcStat.isDirectory()) {
-        if (!dstStat.isDirectory()) throw new Error('verifikasi gagal: tujuan bukan folder');
-      } else {
-        if (dstStat.size !== srcStat.size) throw new Error('verifikasi gagal: ukuran berbeda (' + srcStat.size + ' vs ' + dstStat.size + ')');
+      await copyRecursive(s, d);
+      const [a, b] = await Promise.all([statSafe(s), statSafe(d)]);
+      if (!a || !b) throw new Error('verifikasi gagal: sumber/tujuan hilang setelah copy');
+      if (a.isDirectory()) {
+        if (!b.isDirectory()) throw new Error('verifikasi gagal: tujuan bukan folder');
+      } else if (a.size !== b.size) {
+        throw new Error(`verifikasi gagal: ukuran berbeda (${a.size} vs ${b.size})`);
       }
-      await fsP.rm(s, { recursive: true, force: true });
-      const stillThere = await fsP.stat(s).then(() => true).catch(() => false);
-      if (stillThere) throw new Error('gagal menghapus sumber setelah copy: ' + s);
+      await fsProm.rm(lp(s), { recursive: true, force: true });
+      const still = await statSafe(s);
+      if (still) throw new Error('gagal menghapus sumber setelah copy: ' + s);
+      return { ok: true, from: s, to: d, copy: false, method: 'copy+delete', verified: true };
+    } catch (err2: any) {
+      return { error: e2(err2), code: String(err2?.code || '') };
     }
-    return { ok: true, from: s, to: d, copy: false, method };
-  } catch (e: any) { return { error: e?.message || String(e), code: e?.code }; }
+  }
+}
+
+function e2(err: any) { return err?.message || String(err); }
+
+ipcMain.handle('fs:move', async (_e, src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }) => {
+  try { return await moveItem(src, dest, { overwrite: !!opts?.overwrite, copy: !!opts?.copy }); }
+  catch (e: any) { return { error: e2(e), code: e?.code }; }
 });
 
-ipcMain.handle('fs:read', async (_e, file: string, maxBytes?: number) => {
-  const fsP = await import('fs/promises');
+ipcMain.handle('fs:copy', async (_e, src: string, dest: string, opts?: { overwrite?: boolean }) => {
+  try { return await moveItem(src, dest, { overwrite: !!opts?.overwrite, copy: true }); }
+  catch (e: any) { return { error: e2(e), code: e?.code }; }
+});
+
+ipcMain.handle('fs:delete', async (_e, target: string, opts?: { recursive?: boolean }) => {
   try {
-    const st = await fsP.stat(file);
-    if (st.isDirectory()) return { error: 'ini folder, gunakan file_list' };
-    const limit = Math.min(maxBytes ?? 200_000, 2_000_000);
-    const fh = await fsP.open(file, 'r');
-    const buf = Buffer.alloc(Math.min(limit, st.size));
+    const p = path.resolve(target);
+    const st = await statSafe(p);
+    if (!st) return { ok: true, note: 'sudah tidak ada', path: p };
+    if (st.isDirectory()) {
+      if (!opts?.recursive) return { error: 'ini folder: set recursive=true untuk menghapus beserta isinya', path: p };
+      await fsProm.rm(lp(p), { recursive: true, force: true });
+    } else {
+      await fsProm.unlink(lp(p));
+    }
+    const still = await statSafe(p);
+    return { ok: !still, path: p, note: still ? 'masih ada setelah dihapus' : 'dihapus permanen (bukan Recycle Bin)' };
+  } catch (e: any) { return { error: e2(e), code: e?.code }; }
+});
+
+ipcMain.handle('fs:read', async (_e, file: string, opts?: { offset?: number; limit?: number; maxBytes?: number; withLineNumbers?: boolean }) => {
+  try {
+    const st = await statSafe(file);
+    if (!st) return { error: 'file tidak ada: ' + file, code: 'ENOENT' };
+    if (st.isDirectory()) return { error: 'ini folder, gunakan file_list/file_glob' };
+    const maxBytes = Math.min(opts?.maxBytes ?? 400_000, 5_000_000);
+    const fh = await fsProm.open(lp(file), 'r');
+    const buf = Buffer.alloc(Math.min(maxBytes, st.size));
     await fh.read(buf, 0, buf.length, 0);
     await fh.close();
-    return { ok: true, path: file, size: st.size, truncated: st.size > limit, content: buf.toString('utf8') };
-  } catch (e: any) { return { error: e?.message || String(e) }; }
+    const text = buf.toString('utf8');
+    let content = text;
+    let range: any = undefined;
+    if (opts?.offset !== undefined || opts?.limit !== undefined) {
+      const lines = text.split(/\r?\n/);
+      const from = Math.max(0, (opts?.offset ?? 1) - 1);
+      const to = Math.min(lines.length, from + (opts?.limit ?? 200));
+      range = { from: from + 1, to, total: lines.length };
+      const sliced = lines.slice(from, to);
+      content = (opts?.withLineNumbers === false ? sliced : sliced.map((l, i) => `${from + i + 1}\t${l}`)).join('\n');
+    } else if (opts?.withLineNumbers) {
+      content = text.split(/\r?\n/).map((l, i) => `${i + 1}\t${l}`).join('\n');
+    }
+    return { ok: true, path: file, size: st.size, truncated: st.size > maxBytes, range, content };
+  } catch (e: any) { return { error: e2(e), code: e?.code }; }
+});
+
+ipcMain.handle('fs:edit', async (_e, file: string, opts?: { oldText?: string; newText?: string; replaceAll?: boolean }) => {
+  try {
+    const st = await statSafe(file);
+    if (!st) return { error: 'file tidak ada: ' + file, code: 'ENOENT' };
+    if (st.isDirectory()) return { error: 'ini folder: gunakan file_move/file_copy' };
+    if (st.size > 3_000_000) return { error: 'file terlalu besar (>3 MB) untuk diedit; gunakan file_read + file_write' };
+    const oldText = String(opts?.oldText ?? '');
+    if (!oldText) return { error: 'oldText wajib diisi' };
+    const original = await fsProm.readFile(lp(file), 'utf8');
+    const count = original.split(oldText).length - 1;
+    if (count === 0) return { error: 'teks yang dicari tidak ditemukan', matches: 0, hint: 'baca ulang file (file_read) untuk memastikan teks persisnya' };
+    const next = opts?.replaceAll ? original.split(oldText).join(String(opts?.newText ?? '')) : original.replace(oldText, String(opts?.newText ?? ''));
+    await fsProm.writeFile(lp(file), next, 'utf8');
+    return { ok: true, path: file, matches: count, replaced: opts?.replaceAll ? count : 1, sizeBefore: original.length, sizeAfter: next.length };
+  } catch (e: any) { return { error: e2(e), code: e?.code }; }
+});
+
+// Tulis file dengan long path + auto-buat folder.
+ipcMain.handle('file:write', async (_e, file: string, content: string) => {
+  try {
+    await fsProm.mkdir(lp(path.dirname(path.resolve(file))), { recursive: true });
+    await fsProm.writeFile(lp(file), String(content ?? ''), 'utf8');
+    const st = await statSafe(file);
+    return { ok: true, path: file, size: st?.size ?? 0 };
+  } catch (e: any) { return { error: e2(e), code: e?.code }; }
 });
 
 // ---- Launch app / URL ----
@@ -1041,15 +1320,9 @@ ipcMain.handle('tool:type', async (_e, text: string) => {
   });
 });
 
-// ---- File read/write (sandboxed to user dirs) ----
+// ---- File read (long-path aware; versi tulis ada di bagian fs:*) ----
 ipcMain.handle('file:read', async (_e, pth: string) => {
-  const fs = await import('fs/promises');
-  try { return { content: await fs.readFile(pth, 'utf8') }; }
-  catch (e: any) { return { error: e?.message }; }
-});
-ipcMain.handle('file:write', async (_e, pth: string, content: string) => {
-  const fs = await import('fs/promises');
-  try { await fs.writeFile(pth, content, 'utf8'); return { ok: true }; }
+  try { return { ok: true, content: await fsProm.readFile(lp(pth), 'utf8') }; }
   catch (e: any) { return { error: e?.message }; }
 });
 

@@ -97,8 +97,55 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'file_list',
-      description: 'Daftar file/folder (rekursif maks 3 level) tanpa shell. Lebih aman & cepat daripada exec dir. pattern: filter nama, mis. "*.png".',
-      parameters: { type: 'object', properties: { dir: { type: 'string' }, pattern: { type: 'string' }, max: { type: 'number' } }, required: ['dir'] },
+      description: 'Daftar file/folder (rekursif, default 3 level) tanpa shell. Lebih aman & cepat daripada exec dir. pattern: filter nama, mis. "*.png".',
+      parameters: { type: 'object', properties: { dir: { type: 'string' }, pattern: { type: 'string' }, max: { type: 'number' }, depth: { type: 'number' } }, required: ['dir'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_glob',
+      description: 'Cari file berdasarkan pola path relatif, rekursif (gaya glob/OpenCode). Contoh pattern: "**/*.pdf", "*.log", "docs/**/*.md".',
+      parameters: { type: 'object', properties: { dir: { type: 'string' }, pattern: { type: 'string' }, max: { type: 'number' }, depth: { type: 'number' } }, required: ['dir', 'pattern'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_search',
+      description: 'Cari TEKS di dalam banyak file (gaya grep). Kembalikan path + nomor baris + cuplikan. Pakai ini untuk "file mana yang berisi X".',
+      parameters: {
+        type: 'object',
+        properties: {
+          dir: { type: 'string' }, query: { type: 'string' }, pattern: { type: 'string' },
+          ignoreCase: { type: 'boolean' }, regex: { type: 'boolean' }, max: { type: 'number' }, depth: { type: 'number' },
+        },
+        required: ['dir', 'query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_read',
+      description: 'Baca isi file teks dengan nomor baris. offset (mulai baris, 1-based) dan limit (jumlah baris) seperti read tool DSH/OpenCode. Untuk file besar, baca bertahap.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' }, maxBytes: { type: 'number' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_edit',
+      description: 'Ganti teks persis di dalam file (gaya edit tool). Wajib baca file dulu (file_read) supaya oldText persis. replaceAll untuk semua kemunculan.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, oldText: { type: 'string' }, newText: { type: 'string' }, replaceAll: { type: 'boolean' } },
+        required: ['path', 'oldText', 'newText'],
+      },
     },
   },
   {
@@ -145,7 +192,7 @@ export const TOOLS = [
         '("dir", "Get-ChildItem", "tree") atau memindai disk rekursif — pakai file_list (lebih cepat, aman, tanpa error sintaks). ' +
         'Jangan pindahkan/hapus file di folder sistem (Windows, Program Files, ProgramData, AppData). ' +
         'Mengembalikan stdout/stderr/exit code. timeoutMs default 120000, cwd opsional.',
-      parameters: { type: 'object', properties: { cmd: { type: 'string' }, timeoutMs: { type: 'number' }, cwd: { type: 'string' } }, required: ['cmd'] },
+      parameters: { type: 'object', properties: { cmd: { type: 'string' }, timeoutMs: { type: 'number' }, cwd: { type: 'string' }, shell: { type: 'string', enum: ['cmd', 'powershell'] } }, required: ['cmd'] },
     },
   },
   {
@@ -187,17 +234,48 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'file_read',
-      description: 'Baca file teks.',
-      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      name: 'file_copy',
+      description: 'Salin file/folder (sumber tetap ada), rekursif, otomatis buat folder tujuan. Untuk memindahkan pakai file_move.',
+      parameters: {
+        type: 'object',
+        properties: { src: { type: 'string' }, dest: { type: 'string' }, overwrite: { type: 'boolean' } },
+        required: ['src', 'dest'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_delete',
+      description: 'Hapus file/folder permanen (bukan Recycle Bin). Folder butuh recursive=true. Tidak boleh untuk folder sistem.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' }, recursive: { type: 'boolean' } },
+        required: ['path'],
+      },
     },
   },
   {
     type: 'function',
     function: {
       name: 'file_write',
-      description: 'Tulis file teks.',
+      description: 'Tulis/timpa file teks (auto buat folder). Untuk mengubah sebagian isi file, pakai file_edit agar tidak menimpa seluruh file.',
       parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ask_user',
+      description: 'Tanya pengguna dan TUNGGU jawabannya (gaya ask_user_question). Pakai saat bingung/ ambigu/ butuh izin, JANGAN mengulang tool terus. options: pilihan jawaban cepat (opsional).',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: { type: 'string' },
+          options: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['question'],
+      },
     },
   },
   {
@@ -301,13 +379,25 @@ export async function runTool(name: string, args: any): Promise<any> {
     case 'session_log':
       return { ok: true, note: 'log sesi dibaca di renderer' };
     case 'file_list':
-      return window.dsh.fs.list(args.dir, { pattern: args.pattern, max: args.max });
+      return window.dsh.fs.list(args.dir, { pattern: args.pattern, max: args.max, depth: args.depth });
+    case 'file_glob':
+      return window.dsh.fs.glob(args.dir, { pattern: args.pattern, max: args.max, depth: args.depth });
+    case 'file_search':
+      return window.dsh.fs.search(args.dir, { query: args.query, pattern: args.pattern, max: args.max, ignoreCase: args.ignoreCase, regex: args.regex, depth: args.depth });
     case 'file_move':
       return window.dsh.fs.move(args.src, args.dest, { overwrite: !!args.overwrite, copy: !!args.copy });
+    case 'file_copy':
+      return window.dsh.fs.copy(args.src, args.dest, { overwrite: !!args.overwrite });
+    case 'file_delete':
+      return window.dsh.fs.delete(args.path, { recursive: !!args.recursive });
+    case 'file_read':
+      return window.dsh.fs.read(args.path, { offset: args.offset, limit: args.limit, maxBytes: args.maxBytes, withLineNumbers: true });
+    case 'file_edit':
+      return window.dsh.fs.edit(args.path, { oldText: args.oldText, newText: args.newText, replaceAll: !!args.replaceAll });
     case 'file_mkdir':
       return window.dsh.fs.mkdir(args.dir);
     case 'file_stat':
-      return window.dsh.fs.read(args.path, args.maxBytes);
+      return window.dsh.fs.read(args.path, { maxBytes: args.maxBytes, withLineNumbers: false });
     case 'browser_open': return b.tool('open', { url: args.url });
     case 'browser_action': return b.tool(args.action);
     case 'browser_snapshot': return b.tool('snapshot');
@@ -315,26 +405,24 @@ export async function runTool(name: string, args: any): Promise<any> {
     case 'browser_click': return b.tool('click', { selector: args.selector, text: args.text });
     case 'browser_fill': return b.tool('fill', { selector: args.selector, value: args.value });
     case 'screenshot': return window.dsh.screenshot();
-    case 'exec': return window.dsh.exec(args.cmd, { timeoutMs: args.timeoutMs, cwd: args.cwd });
+    case 'exec': return window.dsh.exec(args.cmd, { timeoutMs: args.timeoutMs, cwd: args.cwd, shell: args.shell });
     case 'launch': return window.dsh.launch(args.exe, args.args);
     case 'mouse': return window.dsh.mouse(args.action, args.x, args.y, args.button);
     case 'type': return window.dsh.type(args.text);
     case 'keys': return window.dsh.keys(args.keys);
-    case 'file_read': return window.dsh.fileRead(args.path);
     case 'file_write': return window.dsh.fileWrite(args.path, args.content);
+    case 'ask_user': return { error: 'ask_user ditangani di renderer' };
     case 'confirm': return window.dsh.confirm(args.message);
     case 'confirm_dangerous': return window.dsh.confirm(args.message);
     default: return { error: 'unknown tool ' + name };
   }
 }
 
-// Aksi di dalam browser tertanam & memori tidak berbahaya.
+// Aksi di dalam browser tertanam, memori, dan semua tool BACA tidak berbahaya.
 export function isDangerous(name: string, _args: any): boolean {
   if (BROWSER_TOOL_NAMES.includes(name)) return false;
   if (MEMORY_TOOL_NAMES.includes(name)) return false;
-  if (name === 'screenshot') return false;
-  if (name === 'file_read') return false;
-  if (name === 'confirm' || name === 'confirm_dangerous') return false;
+  if (['screenshot', 'file_read', 'file_list', 'file_glob', 'file_search', 'file_stat', 'session_log', 'ask_user', 'confirm', 'confirm_dangerous'].includes(name)) return false;
   return true;
 }
 

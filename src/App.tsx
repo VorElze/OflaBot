@@ -240,11 +240,13 @@ function buildBlocks(messages: Msg[]): Block[] {
 function toolCategory(name: string): { key: string; label: string } {
   const n = name || '';
   if (n === 'file_list' || n === 'file_stat' || n === 'file_read') return { key: 'read', label: 'Membaca file' };
+  if (n === 'file_glob' || n === 'file_search') return { key: 'search', label: 'Mencari file' };
   if (n === 'exec' || n === 'launch') return { key: 'commands', label: 'Menjalankan perintah' };
-  if (n === 'file_move' || n === 'file_write' || n === 'file_mkdir') return { key: 'write', label: 'Mengubah file' };
+  if (n === 'file_move' || n === 'file_copy' || n === 'file_write' || n === 'file_mkdir' || n === 'file_edit' || n === 'file_delete') return { key: 'write', label: 'Mengubah file' };
   if (n.startsWith('browser_')) return { key: 'web', label: 'Menjelajah web' };
   if (n.startsWith('memory_') || n.startsWith('skill_')) return { key: 'memory', label: 'Mengingat hal penting' };
   if (n === 'todo_write' || n === 'session_log') return { key: 'plan', label: 'Menyusun rencana' };
+  if (n === 'ask_user') return { key: 'ask', label: 'Menanyakan ke pengguna' };
   if (n === 'screenshot' || n === 'mouse' || n === 'type' || n === 'keys') return { key: 'desktop', label: 'Mengoperasikan layar' };
   return { key: 'tools', label: 'Memakai tool' };
 }
@@ -270,8 +272,8 @@ function activitySummary(items: ActivityItem[]): string {
 
 /** Tool yang hanya membaca: aman di-cache & tidak mengubah apa pun di komputer. */
 const READ_ONLY_TOOLS = new Set([
-  'file_list', 'file_stat', 'file_read', 'browser_text', 'browser_snapshot', 'browser_open',
-  'memory_search', 'skill_list', 'skill_read', 'session_log', 'screenshot',
+  'file_list', 'file_glob', 'file_search', 'file_stat', 'file_read', 'browser_text', 'browser_snapshot',
+  'browser_open', 'memory_search', 'skill_list', 'skill_read', 'session_log', 'screenshot', 'ask_user',
 ]);
 
 /**
@@ -314,7 +316,7 @@ function execVerb(cmd: string): string {
 
 /** Apakah panggilan ini mengubah sesuatu? Kalau tidak, tidak dihitung sebagai kemajuan. */
 function isMutatingCall(name: string, args: any): boolean {
-  if (['file_move', 'file_write', 'file_mkdir', 'launch', 'mouse', 'type', 'keys'].includes(name)) return true;
+  if (['file_move', 'file_copy', 'file_write', 'file_edit', 'file_delete', 'file_mkdir', 'launch', 'mouse', 'type', 'keys'].includes(name)) return true;
   if (name === 'exec') return MUTATING_VERBS.has(execVerb(args?.cmd || ''));
   return false;
 }
@@ -332,10 +334,12 @@ const PROTECTED_ROOTS = [
 
 function protectionViolation(name: string, args: any): string {
   const paths: string[] = [];
-  if (name === 'file_move') paths.push(String(args?.src || ''), String(args?.dest || ''));
+  if (name === 'file_move' || name === 'file_copy') paths.push(String(args?.src || ''), String(args?.dest || ''));
+  if (name === 'file_delete') paths.push(String(args?.path || ''));
+  if (name === 'file_write' || name === 'file_edit') paths.push(String(args?.path || ''));
   if (name === 'exec') {
     const cmd = String(args?.cmd || '');
-    if (/\b(move|del|erase|rmdir|rd|xcopy|robocopy|copy|move-item|remove-item|rename-item|new-item)\b/i.test(cmd)) {
+    if (/\b(move|del|erase|rmdir|rd|xcopy|robocopy|copy|move-item|remove-item|rename-item|new-item|set-content|out-file|remove-item)\b/i.test(cmd)) {
       paths.push(...(cmd.match(/[a-z]:\\[^\s"']*/gi) || []));
     }
   }
@@ -454,6 +458,53 @@ function buildSessionLog(list: Msg[]): any {
 }
 
 /**
+ * Ringkasan pekerjaan deterministik (tanpa model) dipakai saat model berhenti
+ * tanpa jawaban setelah pengaman kemajuan. Dibuat dari log + todo yang nyata.
+ */
+function buildWorkReport(list: Msg[], todos: { content: string; status: string }[]): string {
+  const counts = new Map<string, number>();
+  const errors: string[] = [];
+  const moved: string[] = [];
+  for (const m of list) {
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      for (const tc of m.tool_calls) {
+        const n = tc.function?.name || '';
+        counts.set(n, (counts.get(n) || 0) + 1);
+        if (n === 'file_move' || n === 'file_copy') {
+          try {
+            const a = JSON.parse(tc.function?.arguments || '{}');
+            if (a?.src) moved.push(`${a.src} → ${a.dest || '?'}${a.copy ? ' (copy)' : ''}`);
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    if (m.role === 'tool') {
+      const c = String(m.content || '');
+      if (c.includes('"error"')) {
+        try {
+          const j = JSON.parse(c);
+          if (j?.error) errors.push(`${m.name}: ${String(j.error).slice(0, 120)}`);
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  const lines: string[] = ['Ringkasan pekerjaan (dibuat otomatis oleh OflaBot):'];
+  if (todos.length) lines.push(`- Rencana: ${todos.filter((t) => t.status === 'completed').length}/${todos.length} langkah selesai.`);
+  const acts = ['file_move', 'file_copy', 'file_delete', 'file_edit', 'file_write', 'file_mkdir']
+    .map((n) => [n, counts.get(n) || 0] as [string, number]).filter(([, c]) => c > 0);
+  if (acts.length) lines.push('- Aksi nyata: ' + acts.map(([n, c]) => `${n} ×${c}`).join(', ') + '.');
+  if (moved.length) lines.push('- Contoh file diproses: ' + moved.slice(-8).join(' | '));
+  const reads = ['file_list', 'file_glob', 'file_search', 'file_read', 'file_stat', 'exec']
+    .map((n) => [n, counts.get(n) || 0] as [string, number]).filter(([, c]) => c > 0);
+  if (reads.length) lines.push('- Pemeriksaan: ' + reads.map(([n, c]) => `${n} ×${c}`).join(', ') + '.');
+  if (errors.length) lines.push('- Kendala: ' + Array.from(new Set(errors)).slice(0, 5).join('; '));
+  const pending = todos.filter((t) => t.status !== 'completed').map((t) => t.content);
+  if (pending.length) lines.push('- Belum selesai: ' + pending.slice(0, 4).join('; ') + '.');
+  lines.push('- Langkah berikutnya: jalankan ulang perintah dengan cakupan lebih sempit (mis. satu folder), atau ganti model di Settings.');
+  return lines.join('\n');
+}
+
+/**
  * Perkecil/normalisasi gambar tempelan (pola DSH: cap dimensi & ukuran file)
  * supaya tidak ditolak provider vision dan tidak membengkakkan konteks.
  */
@@ -494,8 +545,11 @@ async function normalizeImageDataUrl(dataUrl: string, maxDim = 1600, maxBytes = 
 const ICON: Record<string, string> = {
   browser_open: '🌐', browser_text: '📄', browser_snapshot: '🖼', browser_click: '👆', browser_fill: '⌨',
   browser_action: '🧭', screenshot: '📸', exec: '⚡', launch: '🚀', mouse: '🖱', type: '⌨', keys: '⌨',
-  file_read: '📖', file_write: '💾', memory_save: '🧠', memory_search: '🔎', memory_delete: '🗑',
+  memory_save: '🧠', memory_search: '🔎', memory_delete: '🗑',
   skill_list: '🧩', skill_read: '📘', confirm: '✅', confirm_dangerous: '✅',
+  file_read: '📖', file_write: '💾', file_list: '📂', file_glob: '🔎', file_search: '🔍',
+  file_move: '📦', file_copy: '🧾', file_delete: '🗑', file_edit: '✏', file_mkdir: '📁', file_stat: '📄',
+  todo_write: '📋', session_log: '🧾', ask_user: '❓',
 };
 
 export default function App() {
@@ -522,6 +576,9 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuView, setMenuView] = useState<'root' | 'permission' | 'shell'>('root');
   const [modal, setModal] = useState<null | 'goal' | 'feedback'>(null);
+  const [askState, setAskState] = useState<null | { question: string; options: string[] }>(null);
+  const [askAnswer, setAskAnswer] = useState('');
+  const askResolverRef = useRef<((v: string) => void) | null>(null);
   const [goalDraft, setGoalDraft] = useState('');
   const [shellDraft, setShellDraft] = useState('');
   const [feedbackText, setFeedbackText] = useState('');
@@ -574,6 +631,23 @@ export default function App() {
   const flash = useCallback((text: string) => {
     setNotice(text);
     window.setTimeout(() => setNotice((n) => (n === text ? '' : n)), 5000);
+  }, []);
+
+  // Tanya pengguna dari dalam agent loop (gaya ask_user_question DSH).
+  const askUserInline = useCallback((question: string, options?: string[]) => {
+    return new Promise<string>((resolve) => {
+      askResolverRef.current = resolve;
+      setAskAnswer('');
+      setAskState({ question: String(question || 'OflaBot butuh konfirmasi'), options: Array.isArray(options) ? options.filter(Boolean).map(String) : [] });
+    });
+  }, []);
+
+  const answerAsk = useCallback((value: string) => {
+    const r = askResolverRef.current;
+    askResolverRef.current = null;
+    setAskState(null);
+    setAskAnswer('');
+    if (r) r(String(value || '').trim() || '(tidak dijawab)');
   }, []);
 
   // ---------------- model dropdown ----------------
@@ -954,7 +1028,7 @@ export default function App() {
 
     let allowed = toolNamesFor(agentDef.tools);
     if (sessions.find((s) => s.id === sessionId)?.planMode) {
-      const SAFE = ['file_list', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read', 'session_log'];
+      const SAFE = ['file_list', 'file_glob', 'file_search', 'file_read', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read', 'session_log', 'ask_user'];
       allowed = allowed.filter((n) => SAFE.includes(n));
     }
     const tools = TOOLS.filter((t: any) => allowed.includes(t.function.name));
@@ -1005,6 +1079,8 @@ export default function App() {
     let stallTotal = 0;         // total panggilan non-aksi dalam satu giliran
     let timeoutStreak = 0;      // perintah yang timeout berturut-turut
     let forceFinal = false;     // paksa model menjawab dari data yang ada
+    let finalAttempts = 0;      // percobaan minta jawaban teks sebelum ringkasan otomatis
+    let todoList: { content: string; status: string }[] = [];  // todo terbaru (untuk ringkasan)
     let taskDone = false;       // model sudah memberi jawaban akhir
     let compactNoticeShown = false;
     let ctx: Msg[] = msgs;      // konteks yang dikirim ke model (bisa diringkas)
@@ -1059,16 +1135,22 @@ export default function App() {
       const text: string = resp.text || '';
       const toolCalls = (resp.tool_calls || []).filter((tc: any) => allowedNames.includes(tc.function?.name));
 
-      // Sebagian provider mengabaikan tool_choice="none": kalau kita sudah
-      // memaksa jawaban, jangan lanjutkan loop — simpulkan dari log.
+      // Sebagian provider mengabaikan tool_choice="none": minta jawaban teks satu
+      // kali lagi, baru kalau tetap memaksa tool -> simpulkan otomatis dari log.
       if (forceFinal && toolCalls.length) {
-        const log = buildSessionLog(msgs);
-        const totals = Object.entries(log.tool_totals || {}).map(([n, c]) => `${n}×${c}`).join(', ');
-        const summary = `Saya berhenti karena tidak ada kemajuan baru (${totals || 'tidak ada tool berhasil'}).` +
-          `${log.errors?.length ? '\nKendala: ' + log.errors.join('; ') : ''}` +
-          '\nCoba ulangi dengan instruksi lebih spesifik, atau ganti model di Settings.';
-        addMsg({ role: 'assistant', content: summary });
-        appendMessage(sessionId, { role: 'assistant', content: summary });
+        if (finalAttempts < 1) {
+          finalAttempts++;
+          ctx.push({
+            role: 'user',
+            content:
+              '[SISTEM] JANGAN memanggil tool lagi. Tulis JAWABAN AKHIR untuk pengguna sekarang, tanpa tool: ' +
+              'apa yang sudah dikerjakan, apa hasilnya, kendala yang muncul, dan langkah berikutnya. Bahasa Indonesia, ringkas.',
+          } as Msg);
+          continue;
+        }
+        const report = buildWorkReport(msgs, todos);
+        addMsg({ role: 'assistant', content: report });
+        appendMessage(sessionId, { role: 'assistant', content: report });
         taskDone = true;
         break;
       }
@@ -1149,21 +1231,25 @@ export default function App() {
 
           let result: any;
           try {
-            result = name === 'session_log'
-              ? buildSessionLog(msgs)
-              : await runTool(name, args);
+            if (name === 'session_log') result = buildSessionLog(msgs);
+            else if (name === 'ask_user') {
+              const answer = await askUserInline(String(args?.question || 'OflaBot butuh konfirmasi'), args?.options);
+              result = { ok: true, question: args?.question, answer };
+            } else result = await runTool(name, args);
           } catch (err: any) {
             result = { error: 'tool gagal: ' + (err?.message || String(err)) };
           }
 
           // Pantau kemajuan: perintah baca (dir/Get-ChildItem/echo/dll) BUKAN aksi.
           markProgress(name, args);
+          if (name === 'ask_user') { exploreStreak = 0; stallTotal = 0; }
           if (result?.timedOut) timeoutStreak++;
           else timeoutStreak = 0;
 
           if (name === 'todo_write') {
             todoSeen = true;
             const list = Array.isArray(result?.todos) ? result.todos : Array.isArray(args.todos) ? args.todos : [];
+            todoList = list;
             setTodos(list);
           }
 
@@ -1197,8 +1283,15 @@ export default function App() {
           hitLimit = true;
           appendMessage(sessionId, {
             role: 'notice',
-            content: `OflaBot sudah ${stallTotal} kali hanya membaca/memeriksa tanpa mengubah apa pun, jadi saya minta ia berhenti dan menyimpulkan.`,
+            content: `OflaBot sudah ${stallTotal} kali hanya membaca/memeriksa tanpa mengubah apa pun, jadi saya minta ia menyimpulkan dari data yang sudah ada.`,
           });
+          ctx.push({
+            role: 'user',
+            content:
+              '[SISTEM] Batas pemeriksaan tercapai. JANGAN memanggil tool lagi. ' +
+              'Tulis JAWABAN AKHIR sekarang: apa yang sudah dikerjakan, apa hasilnya, kendala/error yang muncul, dan langkah berikutnya. ' +
+              'Bahasa Indonesia, ringkas, tanpa menyebut nama tool.',
+          } as Msg);
         } else if (!forceFinal && exploreStreak === 8) {
           systemPrompt +=
             '\n\n[PENGINGAT SISTEM] Kamu sudah membaca banyak data tanpa mengubah apa pun. ' +
@@ -1214,19 +1307,24 @@ export default function App() {
 
       // --- Tidak ada tool call: ini jawaban akhir ---
       if (!text.trim()) {
-        appendMessage(sessionId, {
-          role: 'notice',
-          content: forceFinal
-            ? 'Model berhenti tanpa kesimpulan. Berikut ringkasan pekerjaan yang sudah tercatat di log sesi.'
-            : 'Model tidak mengembalikan jawaban (respons kosong). Coba kirim ulang, atau ganti model/provider di Settings.',
-        });
+        if (forceFinal && finalAttempts < 1) {
+          finalAttempts++;
+          ctx.push({
+            role: 'user',
+            content:
+              '[SISTEM] Jawabanmu kosong. Tulis jawaban akhir dalam teks biasa sekarang: hasil pekerjaan, kendala, langkah berikutnya. ' +
+              'Jangan memanggil tool.',
+          } as Msg);
+          continue;
+        }
         if (forceFinal) {
-          const log = buildSessionLog(msgs);
-          const totals = Object.entries(log.tool_totals || {}).map(([n, c]) => `${n}×${c}`).join(', ');
-          addMsg({ role: 'assistant', content: `Ringkasan otomatis: ${totals || 'tidak ada tool yang berhasil dijalankan'}.${log.errors?.length ? '\nError: ' + log.errors.join('; ') : ''}` });
+          const report = buildWorkReport(msgs, todoList);
+          addMsg({ role: 'assistant', content: report });
+          appendMessage(sessionId, { role: 'assistant', content: report });
+        } else {
           appendMessage(sessionId, {
-            role: 'assistant',
-            content: `Ringkasan otomatis dari log: ${totals || 'tidak ada tool yang berhasil dijalankan'}.${log.errors?.length ? '\nError: ' + log.errors.join('; ') : ''}`,
+            role: 'notice',
+            content: 'Model tidak mengembalikan jawaban (respons kosong). Coba kirim ulang, atau ganti model/provider di Settings.',
           });
         }
         break;
@@ -1692,6 +1790,39 @@ export default function App() {
       </main>
 
       {notice && <div className="toast">{notice}</div>}
+
+      {/* ============ MODAL: tanya pengguna dari agent (ask_user) ============ */}
+      {askState && (
+        <div className="modal-backdrop">
+          <div className="modal narrow" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>❓ OflaBot bertanya</h3>
+            </div>
+            <div className="modal-body">
+              <div className="hint ask-question">{askState.question}</div>
+              {askState.options.length > 0 && (
+                <div className="ask-options">
+                  {askState.options.map((o) => (
+                    <button key={o} className="btn" onClick={() => answerAsk(o)}>{o}</button>
+                  ))}
+                </div>
+              )}
+              <input
+                className="ask-input"
+                autoFocus
+                value={askAnswer}
+                onChange={(e) => setAskAnswer(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); answerAsk(askAnswer); } }}
+                placeholder="Ketik jawaban… (Enter kirim)"
+              />
+              <div className="row-gap end">
+                <button className="btn ghost" onClick={() => answerAsk('dibatalkan pengguna')}>Batal</button>
+                <button className="btn primary" onClick={() => answerAsk(askAnswer)}>Kirim jawaban</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============ MODAL: Goal / Feedback ============ */}
       {modal && (
