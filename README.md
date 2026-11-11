@@ -87,6 +87,17 @@ Catatan build:
 - Aplikasi dijalankan dengan `--no-sandbox` (dibutuhkan Chromium di sebagian
   build Windows). Kalau menjalankan exe langsung, tambahkan flag itu.
 
+Opsional — indeks kode untuk kontributor/AI agent (menghemat pembacaan file):
+
+```bash
+npm run graph:update     # butuh graphify CLI: https://github.com/graphify-dev/graphify
+graphify explain "agentLoop"      # siapa memanggil apa (ringkas, ~250 token)
+graphify affected "toolSignature" # dampak perubahan sebelum refactor
+```
+
+Hasil indeks ada di `graphify-out/` dan **tidak di-commit** (masuk `.gitignore`).
+Jalankan `npm run graph:update` lagi setelah mengubah kode agar line number akurat.
+
 ## 🧩 Contoh memasang skill dari GitHub
 
 1. Buka panel **Skills** di sidebar.

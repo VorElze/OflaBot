@@ -48,7 +48,8 @@
     "build": "tsc -b && vite build",
     "dist": "powershell -ExecutionPolicy Bypass -File build-exe.ps1",
     "preview": "vite preview",
-    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\""
+    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "graph:update": "graphify update ."
   },
   "dependencies": {
     "react": "^18.3.1",

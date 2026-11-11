@@ -41,3 +41,6 @@ installer/Setup2.exe
 .f*out.txt
 .f*err.txt
 .v23-*
+
+# index kode lokal (graphify, opsional)
+graphify-out/
