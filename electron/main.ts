@@ -192,6 +192,39 @@ app.whenReady().then(() => {
           console.log('FEATURES ' + JSON.stringify(feats));
         }
 
+        // Demo: isi sesi contoh (tool calls) untuk memeriksa render gaya DSH.
+        if (process.env.OFLABOT_SMOKE_DEMO) {
+          await win!.webContents.executeJavaScript(`(() => {
+            const now = Date.now();
+            const sid = 'demo-session';
+            const session = {
+              id: sid, title: 'Buka google.com dan cari berita', agentId: 'oflabot', createdAt: now, updatedAt: now,
+              messages: [
+                { role: 'user', content: 'Buka google.com lalu cari berita P3K hari ini', ts: now },
+                { role: 'assistant', content: '(memanggil tool)', tool_calls: [
+                  { id: 'c1', type: 'function', function: { name: 'browser_open', arguments: '{"url":"https://google.com"}' } },
+                  { id: 'c2', type: 'function', function: { name: 'browser_text', arguments: '{}' } },
+                ]},
+                { role: 'tool', name: 'browser_open', tool_call_id: 'c1', content: '{"ok":true,"url":"https://www.google.com/","title":"Google"}' },
+                { role: 'tool', name: 'browser_text', tool_call_id: 'c2', content: '{"ok":true,"title":"Google","url":"https://www.google.com/","text":"halaman pencarian google"}' },
+                { role: 'assistant', content: '**Hasil** — Google berhasil dibuka dan isi halaman terbaca. Mau cari kata kunci tertentu?' },
+              ],
+            };
+            localStorage.setItem('oflabot.sessions.v1', JSON.stringify([session]));
+            localStorage.setItem('oflabot.active-session.v1', sid);
+            localStorage.setItem('oflabot.browser.open', '0');
+            return true;
+          })()`);
+          await win!.webContents.reload();
+          await new Promise((r) => setTimeout(r, 2500));
+        }
+
+        // Uji buka tautan eksternal (OFLABOT_SMOKE_OPEN=1).
+        if (process.env.OFLABOT_SMOKE_OPEN) {
+          const res = await win!.webContents.executeJavaScript(`window.dsh.openExternal('https://saweria.co/OflaCo')`);
+          console.log('OPEN_EXTERNAL ' + JSON.stringify(res));
+        }
+
         const img = await win!.webContents.capturePage();
         require('fs').writeFileSync(out, img.toPNG());
         // Gagal tangkap child view? kirim juga info state browser.
@@ -682,13 +715,35 @@ ipcMain.handle('app:info', () => ({
 }));
 
 ipcMain.handle('ui:openExternal', async (_e, url: string) => {
+  if (!/^https?:\/\//i.test(url || '')) return { error: 'URL tidak valid' };
+
+  // 1) shell.openExternal (cara standar)
   try {
-    if (!/^https?:\/\//i.test(url)) return { error: 'URL tidak valid' };
     await shell.openExternal(url);
-    return { ok: true };
-  } catch (err: any) {
-    return { error: err?.message || String(err) };
+    return { ok: true, via: 'shell' };
+  } catch { /* lanjut ke fallback */ }
+
+  // 2) Fallback: ShellExecute lewat rundll32 / start
+  const attempts: Array<[string, string[]]> = [
+    ['rundll32.exe', ['url.dll,FileProtocolHandler', url]],
+    ['cmd.exe', ['/c', 'start', '', url]],
+    ['explorer.exe', [url]],
+  ];
+  for (const [file, args] of attempts) {
+    try {
+      const res = await new Promise<boolean>((resolve) => {
+        try {
+          const child = spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true });
+          child.on('error', () => resolve(false));
+          child.on('spawn', () => resolve(true));
+          setTimeout(() => resolve(true), 800);
+        } catch { resolve(false); }
+      });
+      if (res) return { ok: true, via: file };
+    } catch { /* coba berikutnya */ }
   }
+
+  return { error: 'Tidak bisa membuka browser default. Buka manual: ' + url };
 });
 
 // ===========================================================================

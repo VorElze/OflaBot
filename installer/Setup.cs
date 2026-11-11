@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("OflaBot")]
 [assembly: AssemblyCompany("OflaBot")]
 [assembly: AssemblyDescription("Installer OflaBot")]
-[assembly: AssemblyVersion("0.2.0.0")]
-[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyVersion("0.2.1.0")]
+[assembly: AssemblyFileVersion("0.2.1.0")]
 
 // OflaBot - installer (single-file, payload ter-embed)
 // Dipakai karena NSIS tidak berjalan baik di build Windows ini.
@@ -24,7 +24,7 @@ static class Setup
     const string AppName = "OflaBot";
     const string AppExe = "OflaBot.exe";
     const string Publisher = "OflaBot";
-    const string Version = "0.2.0";
+    const string Version = "0.2.1";
     const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\OflaBot";
     // Chromium di build Windows ini gagal start (crash 0x80000003) tanpa switch ini.
     const string AppArgs = "--no-sandbox";
@@ -203,11 +203,34 @@ static class Setup
 
         // 2. uninstaller + shortcut + registry
         if (progress != null) progress(90, "Membuat shortcut launcher...");
-        string selfExe = Assembly.GetExecutingAssembly().Location;
-        string uninstaller = Path.Combine(target, "Uninstall.exe");
-        try { File.Copy(selfExe, uninstaller, true); } catch { /* abaikan */ }
-
         string appPath = Path.Combine(target, AppExe);
+
+        // 2a. Uninstaller berbasis batch: transparan, tidak butuh proses .NET,
+        //     dan tetap bisa menghapus folder setelah aplikasi ditutup.
+        string uninstaller = Path.Combine(target, "uninstall.cmd");
+        try
+        {
+            string[] ul = new string[] {
+                "@echo off",
+                "setlocal enableextensions",
+                "set \"APPDIR=%~dp0\"",
+                "if \"%APPDIR:~-1%\"==\"\\\" set \"APPDIR=%APPDIR:~0,-1%\"",
+                "echo Menghapus " + AppName + "...",
+                "taskkill /f /im \"" + AppExe + "\" >nul 2>&1",
+                "ping 127.0.0.1 -n 3 >nul",
+                "del /f /q \"%USERPROFILE%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1",
+                "del /f /q \"%PUBLIC%\\Desktop\\" + AppName + ".lnk\" >nul 2>&1",
+                "del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\\" + AppName + ".lnk\" >nul 2>&1",
+                "rmdir /s /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\" + AppName + "\" >nul 2>&1",
+                "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1",
+                "reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OflaBot\" /f >nul 2>&1",
+                "copy /y \"%~f0\" \"%TEMP%\\oflabot-uninstall-run.cmd\" >nul 2>&1",
+                "start \"\" powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command \"for($i=0;$i -lt 20;$i++){ Start-Sleep -Milliseconds 600; try { Remove-Item -LiteralPath '%APPDIR%' -Recurse -Force -ErrorAction Stop; break } catch {} }\"",
+                "exit /b 0",
+            };
+            File.WriteAllText(uninstaller, string.Join("\r\n", ul) + "\r\n");
+        }
+        catch { }
 
         // 2a. Launcher yang aman dari SmartScreen.
         // Menjalankan exe langsung dari shortcut/Explorer bisa diblokir
@@ -259,7 +282,7 @@ static class Setup
         string menuDir = Path.Combine(programs, AppName);
         try { Directory.CreateDirectory(menuDir); } catch { }
         smOk &= CreateShortcut(Path.Combine(menuDir, AppName + ".lnk"), lnkTarget, target, lnkArgs, appPath);
-        CreateShortcut(Path.Combine(menuDir, "Uninstall " + AppName + ".lnk"), uninstaller, target, "--uninstall", uninstaller);
+        CreateShortcut(Path.Combine(menuDir, "Uninstall " + AppName + ".lnk"), "cmd.exe", target, @"/c """"" + uninstaller + @"""", uninstaller);
 
         // Catatan diagnosa (membantu kalau shortcut tidak terbentuk).
         try
@@ -285,8 +308,8 @@ static class Setup
                     k.SetValue("Publisher", Publisher);
                     k.SetValue("DisplayIcon", appPath);
                     k.SetValue("InstallLocation", target);
-                    k.SetValue("UninstallString", "\"" + uninstaller + "\" --uninstall");
-                    k.SetValue("QuietUninstallString", "\"" + uninstaller + "\" --uninstall /S");
+                    k.SetValue("UninstallString", "cmd.exe /c \"\"\"" + uninstaller + "\"\"\"");
+                    k.SetValue("QuietUninstallString", "cmd.exe /c \"\"\"" + uninstaller + "\"\"\"");
                     k.SetValue("NoModify", 1, RegistryValueKind.DWord);
                     k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
                     k.SetValue("EstimatedSize", 390000, RegistryValueKind.DWord);
@@ -337,8 +360,58 @@ static class Setup
     }
 
     // ---------------- uninstall ----------------
+    static void KillRunningApp()
+    {
+        // PENTING: jangan pernah taskkill "Uninstall.exe" — itu proses kita sendiri.
+        string appImage = Path.GetFileNameWithoutExtension(AppExe);
+        foreach (string image in new string[] { appImage })
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("taskkill.exe", "/F /T /IM \"" + image + ".exe\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                var p = Process.Start(psi);
+                if (p != null) p.WaitForExit(8000);
+            }
+            catch { }
+        }
+        System.Threading.Thread.Sleep(1200);
+    }
+
+    static void TryDeleteFile(string path, int attempts = 6)
+    {
+        for (int i = 0; i < attempts; i++)
+        {
+            try { if (File.Exists(path)) File.Delete(path); return; }
+            catch { System.Threading.Thread.Sleep(350); }
+        }
+    }
+
+    static void TryDeleteDir(string path, int attempts = 6)
+    {
+        for (int i = 0; i < attempts; i++)
+        {
+            try { if (Directory.Exists(path)) Directory.Delete(path, true); return; }
+            catch { System.Threading.Thread.Sleep(350); }
+        }
+    }
+
+    static void UninstallLog(string file, string text)
+    {
+        try { File.AppendAllText(file, "[" + DateTime.Now.ToString("HH:mm:ss") + "] " + text + Environment.NewLine); } catch { }
+    }
+
     static void Uninstall(bool silent)
     {
+        string log = Path.Combine(Path.GetTempPath(), "oflabot-uninstall.log");
+        try { File.Delete(log); } catch { }
+        UninstallLog(log, "mulai uninstall");
+
         // Folder install ditentukan dari lokasi file exe ini (paling andal),
         // lalu fallback ke registry / lokasi default.
         string self = Assembly.GetExecutingAssembly().Location;
@@ -348,32 +421,73 @@ static class Setup
             string reg = ReadInstallLocation();
             target = reg != null ? reg : InstallDir;
         }
-        try
-        {
-            string desktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), AppName + ".lnk");
-            if (File.Exists(desktop)) File.Delete(desktop);
-            string menuDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppName);
-            try { Directory.Delete(menuDir, true); } catch { }
-            try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
-        }
-        catch { }
 
-        // hapus isi folder, lalu jadwalkan penghapusan folder + exe ini sendiri
+        // 1. Hentikan aplikasi (file terkunci selama aplikasi berjalan).
+        KillRunningApp();
+
+        // 2. Hapus shortcut: desktop user, desktop publik, Start Menu (user & all users).
+        UninstallLog(log, "target=" + target);
+        string[] desktops = new string[] {
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+        };
+        foreach (string desk in desktops)
+        {
+            if (string.IsNullOrEmpty(desk)) { UninstallLog(log, "desk kosong"); continue; }
+            string lnk = Path.Combine(desk, AppName + ".lnk");
+            bool existed = File.Exists(lnk);
+            TryDeleteFile(lnk);
+            UninstallLog(log, "shortcut " + lnk + " existed=" + existed + " now=" + File.Exists(lnk));
+        }
+        string[] programDirs = new string[] {
+            Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms),
+        };
+        foreach (string prog in programDirs)
+        {
+            if (string.IsNullOrEmpty(prog)) continue;
+            TryDeleteDir(Path.Combine(prog, AppName));
+            TryDeleteFile(Path.Combine(prog, AppName + ".lnk"));
+        }
+
+        // 3. Hapus entri "Programs and Features".
+        try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
+        try { Registry.LocalMachine.DeleteSubKeyTree(UninstKey, false); } catch { }
+
+        // 4. Hapus isi folder instalasi (kecuali exe uninstaller ini), lalu sisanya
+        //    dijadwalkan lewat cmd setelah proses ini keluar.
         try
         {
             foreach (string dir in Directory.GetDirectories(target))
-                try { Directory.Delete(dir, true); } catch { }
+                TryDeleteDir(dir);
             foreach (string file in Directory.GetFiles(target))
-                if (!string.Equals(Path.GetFullPath(file), Path.GetFullPath(Assembly.GetExecutingAssembly().Location), StringComparison.OrdinalIgnoreCase))
-                    try { File.Delete(file); } catch { }
+            {
+                if (string.Equals(Path.GetFullPath(file), Path.GetFullPath(self), StringComparison.OrdinalIgnoreCase)) continue;
+                TryDeleteFile(file);
+            }
         }
         catch { }
 
-        string cmd = "/c ping 127.0.0.1 -n 3 > nul & del /f /q \"" + Assembly.GetExecutingAssembly().Location +
-                     "\" & rmdir /s /q \"" + target + "\"";
-        try { Process.Start(new ProcessStartInfo("cmd.exe", cmd) { WindowStyle = ProcessWindowStyle.Hidden }); } catch { }
+        // 5. Bersihkan sisa folder + diri sendiri setelah proses keluar.
+        //    cmd mengulang rmdir beberapa kali karena file bisa masih terkunci sesaat.
+        string cmd =
+            "/c ping 127.0.0.1 -n 3 >nul & " +
+            "(for /l %i in (1,1,12) do (del /f /q \"" + self + "\" >nul 2>&1 & " +
+            "rmdir /s /q \"" + target + "\" >nul 2>&1 & " +
+            "if not exist \"" + target + "\" exit /b 0 & ping 127.0.0.1 -n 2 >nul))";
+        try
+        {
+            Process.Start(new ProcessStartInfo("cmd.exe", cmd)
+            {
+                WindowStyle = ProcessWindowStyle.Hidden,
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            });
+        }
+        catch { }
 
         if (!silent)
-            MessageBox.Show("OflaBot telah dihapus.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(AppName + " telah dihapus." + Environment.NewLine +
+                "Folder: " + target, AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 }

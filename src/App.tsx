@@ -8,9 +8,17 @@ type Msg = { role: Role; content: any; name?: string; tool_call_id?: string; too
 type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number };
 type Settings = { provider: string; baseUrl: string; apiKey: string; model: string; autoLearn: boolean };
 
+type ActivityItem = { name: string; args?: any; result?: any; image?: string; denied?: boolean };
+type Block =
+  | { kind: 'user'; msg: Msg }
+  | { kind: 'assistant'; msg: Msg }
+  | { kind: 'notice'; msg: Msg }
+  | { kind: 'activity'; items: ActivityItem[]; text?: string };
+
 const SESSIONS_KEY = 'oflabot.sessions.v1';
 const ACTIVE_KEY = 'oflabot.active-session.v1';
 const SETTINGS_KEY = 'oflabot.settings.v1';
+const BROWSER_OPEN_KEY = 'oflabot.browser.open';
 const LEGACY = { settings: 'grokbot.settings.v1', sessions: 'grokbot.sessions.v3', active: 'grokbot.active-session.v3' };
 const DONATE_URL = 'https://saweria.co/OflaCo';
 
@@ -37,11 +45,9 @@ function loadSettings(): Settings {
     if (raw) {
       const p = JSON.parse(raw);
       if (p && typeof p === 'object') {
-        // migrasi id provider lama
         const provider = String(p.provider || 'openai');
-        const mapped = provider === 'syncera' ? 'syncera-anthropic' : provider;
         return {
-          provider: mapped,
+          provider: provider === 'syncera' ? 'syncera-anthropic' : provider,
           baseUrl: p.baseUrl ?? fallback.baseUrl,
           apiKey: p.apiKey ?? '',
           model: p.model ?? '',
@@ -82,8 +88,7 @@ function timeAgo(ts: number): string {
 
 function safeJson(text: string): any {
   if (!text) return null;
-  const cleaned = text.replace(/```json/gi, '```').split('```').map((s) => s.trim()).filter(Boolean);
-  for (const chunk of [text, ...cleaned]) {
+  for (const chunk of [text]) {
     const start = chunk.indexOf('{');
     const end = chunk.lastIndexOf('}');
     if (start >= 0 && end > start) {
@@ -92,6 +97,61 @@ function safeJson(text: string): any {
   }
   return null;
 }
+
+function pretty(v: any, max = 900): string {
+  try {
+    const s = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+    return s.length > max ? s.slice(0, max) + '\n…' : s;
+  } catch { return String(v); }
+}
+
+/** Kelompokkan pesan menjadi blok: bubble user/assistant dan aktivitas tool (collapsible). */
+function buildBlocks(messages: Msg[]): Block[] {
+  const blocks: Block[] = [];
+  const byCallId = new Map<string, Msg>();
+  for (const m of messages) if (m.role === 'tool' && m.tool_call_id) byCallId.set(m.tool_call_id, m);
+
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+    if (m.role === 'notice') { blocks.push({ kind: 'notice', msg: m }); i++; continue; }
+    if (m.role === 'tool') { i++; continue; } // hasil tool selalu dilipat ke activity
+
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const items: ActivityItem[] = [];
+      for (const tc of m.tool_calls) {
+        const resMsg = byCallId.get(tc.id);
+        let res: any = resMsg?.content;
+        if (typeof res === 'string') { try { res = JSON.parse(res); } catch { /* biarkan string */ } }
+        const denied = !!(res && typeof res === 'object' && String(res.error || '').includes('dibatalkan'));
+        items.push({ name: tc.function?.name, args: safeJson(tc.function?.arguments) ?? tc.function?.arguments, result: res, image: resMsg?.image, denied });
+      }
+      blocks.push({ kind: 'activity', items, text: typeof m.content === 'string' && m.content.trim() && m.content !== '(memanggil tool)' ? m.content : undefined });
+      i++;
+      continue;
+    }
+
+    if (m.role === 'user') { blocks.push({ kind: 'user', msg: m }); i++; continue; }
+    if (m.role === 'assistant') { blocks.push({ kind: 'assistant', msg: m }); i++; continue; }
+    i++;
+  }
+  return blocks;
+}
+
+function activitySummary(items: ActivityItem[]): string {
+  const names = Array.from(new Set(items.map((it) => it.name || 'tool')));
+  const denied = items.filter((it) => it.denied).length;
+  const label = names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : '');
+  const base = items.length === 1 ? `Used ${label}` : `Used ${items.length} tools · ${label}`;
+  return denied ? `${base} · ${denied} dibatalkan` : base;
+}
+
+const ICON: Record<string, string> = {
+  browser_open: '🌐', browser_text: '📄', browser_snapshot: '🖼', browser_click: '👆', browser_fill: '⌨',
+  browser_action: '🧭', screenshot: '📸', exec: '⚡', launch: '🚀', mouse: '🖱', type: '⌨', keys: '⌨',
+  file_read: '📖', file_write: '💾', memory_save: '🧠', memory_search: '🔎', memory_delete: '🗑',
+  skill_list: '🧩', skill_read: '📘', confirm: '✅', confirm_dangerous: '✅',
+};
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -104,9 +164,12 @@ export default function App() {
   });
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'browser'>('chat');
+  const [browserOpen, setBrowserOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem(BROWSER_OPEN_KEY) !== '0'; } catch { return true; }
+  });
   const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate'>(null);
   const [notice, setNotice] = useState('');
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   // model dropdown
   const [models, setModels] = useState<string[]>([]);
@@ -137,12 +200,13 @@ export default function App() {
   const agent = useMemo(() => getAgent(active?.agentId || 'oflabot'), [active?.agentId]);
   const prov = getProvider(settings.provider);
   const isAnthropic = isAnthropicLike(settings.provider);
-  const browserToolOk = hostReady && !!window.dsh.browser;
+  const browserToolOk = hostReady && !!window.dsh?.browser;
 
   // ---------------- persistence ----------------
   useEffect(() => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* ignore */ } }, [settings]);
   useEffect(() => { try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions.slice(-80))); } catch { /* ignore */ } }, [sessions]);
   useEffect(() => { if (active?.id) { try { localStorage.setItem(ACTIVE_KEY, active.id); } catch { /* ignore */ } } }, [active?.id]);
+  useEffect(() => { try { localStorage.setItem(BROWSER_OPEN_KEY, browserOpen ? '1' : '0'); } catch { /* ignore */ } }, [browserOpen]);
   useEffect(() => { if (!activeId && sessions[0]) setActiveId(sessions[0].id); }, [activeId, sessions]);
 
   const flash = useCallback((text: string) => {
@@ -161,14 +225,9 @@ export default function App() {
       let list: string[] = Array.isArray(res.models) ? res.models : [];
       if (!list.length && p.fallbackModels?.length) list = p.fallbackModels;
       setModels(list);
-      if (res.error) {
-        setModelErr(typeof res.error === 'string' ? res.error : JSON.stringify(res.error).slice(0, 220));
-      } else if (!list.length) {
-        setModelErr('Provider tidak mengembalikan daftar model.');
-      }
-      if (list.length && !list.includes(settings.model) && !silent) {
-        setSettings((s) => ({ ...s, model: list[0] }));
-      }
+      if (res.error) setModelErr(typeof res.error === 'string' ? res.error : JSON.stringify(res.error).slice(0, 220));
+      else if (!list.length) setModelErr('Provider tidak mengembalikan daftar model.');
+      if (list.length && !list.includes(settings.model) && !silent) setSettings((s) => ({ ...s, model: list[0] }));
     } catch (err: any) {
       setModelErr(err?.message || String(err));
     } finally {
@@ -176,7 +235,6 @@ export default function App() {
     }
   }, [hostReady, settings.provider, settings.baseUrl, settings.apiKey, settings.model]);
 
-  // muat otomatis saat provider/base/key berubah
   useEffect(() => {
     if (!hostReady) return;
     const p = getProvider(settings.provider);
@@ -207,15 +265,14 @@ export default function App() {
     window.dsh.appInfo().then((i) => setAppVersion(i?.version || '')).catch(() => { /* ignore */ });
   }, [hostReady, refreshMemory, refreshSkills]);
 
-  // ---------------- browser ----------------
+  // ---------------- browser panel bounds ----------------
   const syncBrowserBounds = useCallback(async () => {
     if (!browserToolOk) return;
-    if (tab !== 'browser' || panel) { await window.dsh.browser.hide(); return; }
     const el = browserSlotRef.current;
-    if (!el) return;
+    if (!browserOpen || panel || !el) { await window.dsh.browser.hide(); return; }
     const r = el.getBoundingClientRect();
     await window.dsh.browser.show({ x: Math.round(r.left), y: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) });
-  }, [browserToolOk, tab, panel]);
+  }, [browserToolOk, browserOpen, panel]);
 
   useEffect(() => { void syncBrowserBounds(); }, [syncBrowserBounds]);
   useEffect(() => {
@@ -230,9 +287,21 @@ export default function App() {
   useEffect(() => {
     if (!browserToolOk) return;
     const offState = window.dsh.browser.onState((s) => { setBrowserState(s); if (s.url) setUrlInput(s.url); });
-    const offOpen = window.dsh.browser.onRequestOpen(({ url }) => { setTab('browser'); setUrlInput(url); });
+    const offOpen = window.dsh.browser.onRequestOpen(({ url }) => { setBrowserOpen(true); setUrlInput(url); });
     return () => { offState(); offOpen(); };
   }, [browserToolOk]);
+
+  // Ctrl+Alt+B: buka/tutup panel browser (seperti DSH).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.altKey && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault();
+        setBrowserOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [active?.messages.length, running]);
 
@@ -257,7 +326,6 @@ export default function App() {
     const s = newSession(agentId);
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
-    setTab('chat');
     setInput('');
   }
 
@@ -272,9 +340,20 @@ export default function App() {
 
   async function navigateBrowser(url: string) {
     if (!url) return;
+    if (!browserOpen) setBrowserOpen(true);
     const st = await window.dsh.browser.navigate(url);
     setBrowserState(st);
     if (st.url) setUrlInput(st.url);
+  }
+
+  async function openDonate() {
+    const r = await window.dsh.openExternal(DONATE_URL);
+    if (!r?.ok) {
+      setPanel(null);
+      setBrowserOpen(true);
+      void navigateBrowser(DONATE_URL);
+      flash(r?.error || 'Browser default tidak bisa dibuka — dibuka di panel browser aplikasi.');
+    }
   }
 
   // ---------------- system prompt (agent + memory + skill) ----------------
@@ -282,19 +361,10 @@ export default function App() {
     let extra = '';
     try {
       const mem = await window.dsh.memory.context(40);
-      if (mem.memories?.length) {
-        extra += '\n\n=== MEMORY TERSIMPAN (ingat ini) ===\n' +
-          mem.memories.map((m) => `- ${m.title}: ${m.body.slice(0, 400)}`).join('\n');
-      }
-      if (mem.skills?.length) {
-        extra += '\n\n=== SKILL HASIL BELAJAR ===\n' +
-          mem.skills.map((m) => `- ${m.title}: ${m.body.slice(0, 300)}`).join('\n');
-      }
+      if (mem.memories?.length) extra += '\n\n=== MEMORY TERSIMPAN ===\n' + mem.memories.map((m) => `- ${m.title}: ${m.body.slice(0, 400)}`).join('\n');
+      if (mem.skills?.length) extra += '\n\n=== SKILL HASIL BELAJAR ===\n' + mem.skills.map((m) => `- ${m.title}: ${m.body.slice(0, 300)}`).join('\n');
       const sk = await window.dsh.skills.context();
-      if (sk.enabled?.length) {
-        extra += '\n\n=== SKILL TERPASANG (panggil skill_read sebelum dipakai) ===\n' +
-          sk.enabled.map((s: any) => `- ${s.slug} (${s.name}): ${s.description}`).join('\n');
-      }
+      if (sk.enabled?.length) extra += '\n\n=== SKILL TERPASANG (panggil skill_read sebelum dipakai) ===\n' + sk.enabled.map((s: any) => `- ${s.slug} (${s.name}): ${s.description}`).join('\n');
     } catch { /* abaikan */ }
     return def.system + extra;
   }
@@ -319,7 +389,7 @@ export default function App() {
     const allowedNames = tools.map((t: any) => t.function.name);
     const systemPrompt = await buildSystemPrompt(agentDef);
 
-    let msgs: Msg[] = [...(sessions.find((s) => s.id === sessionId)?.messages ?? []), { role: 'user', content: userText }];
+    const msgs: Msg[] = [...(sessions.find((s) => s.id === sessionId)?.messages ?? []), { role: 'user', content: userText }];
     appendMessage(sessionId, { role: 'user', content: userText, ts: Date.now() });
 
     let steps = 0;
@@ -332,9 +402,7 @@ export default function App() {
         model: settings.model,
         system: systemPrompt,
         messages: messagesForApi(msgs),
-        tools: isAnthropic
-          ? tools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }))
-          : tools,
+        tools: isAnthropic ? tools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters })) : tools,
         tool_choice: isAnthropic ? undefined : 'auto',
       };
 
@@ -380,8 +448,7 @@ export default function App() {
             msgs.push({ role: 'user', content: [{ type: 'image_url', image_url: { url: image } }] } as any);
             appendMessage(sessionId, { role: 'user', content: '[gambar halaman]' });
           }
-
-          if (name === 'memory_save' || name === 'memory_delete' || name === 'skill_read') void refreshMemory();
+          if (name.startsWith('memory_') || name.startsWith('skill_')) void refreshMemory();
         }
         continue;
       }
@@ -394,10 +461,9 @@ export default function App() {
     if (steps >= 30) appendMessage(sessionId, { role: 'notice', content: 'Batas 30 langkah agent tercapai. Kirim instruksi lanjutan.' });
     setRunning(false);
     void refreshMemory();
-    return steps;
   }
 
-  // ---------------- auto-learn (Hermes-style reflection) ----------------
+  // ---------------- auto-learn ----------------
   async function learnFromSession(session: Session) {
     if (!settings.autoLearn || learning) return;
     const transcript = session.messages
@@ -411,35 +477,19 @@ export default function App() {
     try {
       const prompt =
         'Analisa percakapan berikut. Ekstrak HANYA informasi yang layak diingat jangka panjang dan skill/prosedur yang bisa dipakai ulang.\n' +
-        'Balas HANYA JSON valid dengan bentuk:\n' +
-        '{"memories":[{"title":"...","body":"...","tags":["..."]}],"skills":[{"title":"...","body":"langkah 1...; langkah 2..."}]}\n' +
+        'Balas HANYA JSON valid: {"memories":[{"title":"...","body":"...","tags":["..."]}],"skills":[{"title":"...","body":"langkah 1...; langkah 2..."}]}\n' +
         'Jika tidak ada yang layak, balas {"memories":[],"skills":[]}. Jangan menyimpan rahasia (password/API key).\n\n' +
         'PERCAKAPAN:\n' + transcript;
 
-      const resp = await window.dsh.chat({
-        provider: isAnthropic ? 'anthropic' : 'openai',
-        baseUrl: settings.baseUrl,
-        apiKey: settings.apiKey,
-        model: settings.model,
-        messages: [{ role: 'user', content: prompt }],
-      });
+      const resp = await window.dsh.chat({ provider: isAnthropic ? 'anthropic' : 'openai', baseUrl: settings.baseUrl, apiKey: settings.apiKey, model: settings.model, messages: [{ role: 'user', content: prompt }] });
       if (resp?.error || !resp?.text) return;
       const data = safeJson(resp.text);
       if (!data) return;
       let saved = 0;
-      for (const m of data.memories || []) {
-        if (m?.title && m?.body) { await window.dsh.memory.add({ kind: 'memory', title: m.title, body: m.body, tags: m.tags }); saved++; }
-      }
-      for (const s of data.skills || []) {
-        if (s?.title && s?.body) { await window.dsh.memory.add({ kind: 'skill', title: s.title, body: s.body }); saved++; }
-      }
-      if (saved) {
-        void refreshMemory();
-        flash(`Belajar ${saved} hal baru dari sesi ini (memory/skill).`);
-      }
-    } catch { /* abaikan */ } finally {
-      setLearning(false);
-    }
+      for (const m of data.memories || []) if (m?.title && m?.body) { await window.dsh.memory.add({ kind: 'memory', title: m.title, body: m.body, tags: m.tags }); saved++; }
+      for (const s of data.skills || []) if (s?.title && s?.body) { await window.dsh.memory.add({ kind: 'skill', title: s.title, body: s.body }); saved++; }
+      if (saved) { void refreshMemory(); flash(`Belajar ${saved} hal baru dari sesi ini.`); }
+    } catch { /* abaikan */ } finally { setLearning(false); }
   }
 
   async function send() {
@@ -454,12 +504,11 @@ export default function App() {
     updateSession(active.id, (s) => ({ ...s, title: s.messages.length === 0 ? sessionTitle(text) : s.title }));
     const snapshot = active;
     await agentLoop(snapshot.id, text, getAgent(snapshot.agentId));
-    const updated = { ...snapshot, messages: [...snapshot.messages] };
     try {
       const fresh = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '[]') as Session[];
       const s2 = fresh.find((x) => x.id === snapshot.id);
       if (s2) void learnFromSession(s2);
-    } catch { void learnFromSession(updated); }
+    } catch { /* ignore */ }
   }
 
   // ---------------- skills actions ----------------
@@ -469,13 +518,8 @@ export default function App() {
     try {
       const r = await window.dsh.skills.installRepo(repoInput.trim());
       if (r?.error) setSkillMsg('Gagal: ' + r.error);
-      else {
-        setSkillMsg(`Selesai: ${r.installed?.length || 0}/${r.found || 0} skill terpasang.`);
-        setRepoInput('');
-        void refreshSkills();
-      }
-    } catch (err: any) { setSkillMsg('Gagal: ' + (err?.message || String(err))); }
-    finally { setSkillBusy(false); }
+      else { setSkillMsg(`Selesai: ${r.installed?.length || 0}/${r.found || 0} skill terpasang.`); setRepoInput(''); void refreshSkills(); }
+    } catch (err: any) { setSkillMsg('Gagal: ' + (err?.message || String(err))); } finally { setSkillBusy(false); }
   }
 
   async function importLocalSkills() {
@@ -484,14 +528,49 @@ export default function App() {
       const r = await window.dsh.skills.importLocal();
       setSkillMsg(`Ditemukan ${r.found || 0}, ditambahkan ${r.added || 0}.`);
       void refreshSkills();
-    } catch (err: any) { setSkillMsg('Gagal: ' + (err?.message || String(err))); }
-    finally { setSkillBusy(false); }
+    } catch (err: any) { setSkillMsg('Gagal: ' + (err?.message || String(err))); } finally { setSkillBusy(false); }
   }
 
   // ---------------- render ----------------
   const messages = active?.messages ?? [];
+  const blocks = useMemo(() => buildBlocks(messages), [messages]);
   const memCount = memEntries.filter((m) => m.kind === 'memory').length;
   const skillMemCount = memEntries.filter((m) => m.kind === 'skill').length;
+
+  const toggle = (key: string) => setExpanded((e) => ({ ...e, [key]: !e[key] }));
+
+  function renderActivity(b: Extract<Block, { kind: 'activity' }>, key: string) {
+    const open = !!expanded[key];
+    return (
+      <div className={`activity ${open ? 'open' : ''}`}>
+        <button className="activity-head" onClick={() => toggle(key)}>
+          <span className="activity-chevron">{open ? '▾' : '▸'}</span>
+          <span className="activity-icon">⚙</span>
+          <span className="activity-title">{activitySummary(b.items)}</span>
+          <span className="activity-hint">{open ? 'sembunyikan' : 'detail'}</span>
+        </button>
+        {open && (
+          <div className="activity-body">
+            {b.text && <div className="activity-note">{b.text}</div>}
+            {b.items.map((it, idx) => (
+              <div key={idx} className="activity-item">
+                <div className="activity-item-head">
+                  <span>{ICON[it.name || ''] || '•'}</span>
+                  <b>{it.name}</b>
+                  {it.denied && <span className="tag warn">dibatalkan</span>}
+                  {it.args && Object.keys(it.args).length > 0 && (
+                    <span className="activity-args">{pretty(it.args, 120).replace(/\s+/g, ' ')}</span>
+                  )}
+                </div>
+                {it.image && <img className="tool-image" src={it.image} alt="snapshot" />}
+                <pre className="activity-result mono">{pretty(it.result, 700)}</pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="shell">
@@ -501,7 +580,6 @@ export default function App() {
           <span className="brand-dot" />
           <span>OflaBot</span>
         </div>
-
         <button className="new-session" onClick={() => createSession(active?.agentId || 'oflabot')}>
           <span>＋</span> Sesi Baru
         </button>
@@ -510,12 +588,8 @@ export default function App() {
           <div className="side-title">Agents</div>
           <div className="agent-list">
             {AGENTS.map((a) => (
-              <button
-                key={a.id}
-                className={`agent-item ${active?.agentId === a.id ? 'active' : ''}`}
-                title={a.description}
-                onClick={() => active && updateSession(active.id, (s) => ({ ...s, agentId: a.id }))}
-              >
+              <button key={a.id} className={`agent-item ${active?.agentId === a.id ? 'active' : ''}`} title={a.description}
+                onClick={() => active && updateSession(active.id, (s) => ({ ...s, agentId: a.id }))}>
                 <span className="agent-icon">{a.icon}</span>
                 <span className="agent-name">{a.name}</span>
               </button>
@@ -527,7 +601,7 @@ export default function App() {
           <div className="side-title">Sessions</div>
           <div className="session-list">
             {sessions.map((s) => (
-              <div key={s.id} className={`session-item ${s.id === active?.id ? 'active' : ''}`} onClick={() => { setActiveId(s.id); setTab('chat'); }}>
+              <div key={s.id} className={`session-item ${s.id === active?.id ? 'active' : ''}`} onClick={() => setActiveId(s.id)}>
                 <div className="session-main">
                   <div className="session-title">{s.title}</div>
                   <div className="session-meta">{getAgent(s.agentId).name} · {timeAgo(s.updatedAt)}</div>
@@ -539,12 +613,8 @@ export default function App() {
         </div>
 
         <div className="side-actions">
-          <button className="side-btn" onClick={() => { setPanel('memory'); void refreshMemory(); }}>
-            🧠 Memory <span className="badge">{memCount}/{skillMemCount}</span>
-          </button>
-          <button className="side-btn" onClick={() => { setPanel('skills'); void refreshSkills(); }}>
-            🧩 Skills <span className="badge">{skillList.filter((s) => s.enabled).length}/{skillList.length}</span>
-          </button>
+          <button className="side-btn" onClick={() => { setPanel('memory'); void refreshMemory(); }}>🧠 Memory <span className="badge">{memCount}/{skillMemCount}</span></button>
+          <button className="side-btn" onClick={() => { setPanel('skills'); void refreshSkills(); }}>🧩 Skills <span className="badge">{skillList.filter((s) => s.enabled).length}/{skillList.length}</span></button>
           <button className="side-btn" onClick={() => setPanel('settings')}>⚙ Settings</button>
           <button className="side-btn donate" onClick={() => setPanel('donate')}>❤ Dukung OflaBot</button>
         </div>
@@ -553,9 +623,10 @@ export default function App() {
       {/* ============ MAIN ============ */}
       <main className="main">
         <header className="topbar">
-          <div className="tabs">
-            <button className={`tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>Chat</button>
-            <button className={`tab ${tab === 'browser' ? 'active' : ''}`} onClick={() => setTab('browser')}>Browser</button>
+          <div className="topbar-left">
+            <span className="mode-pill">Chat</span>
+            <button className={`btn icon ghost ${browserOpen ? 'on' : ''}`} title="Browser (Ctrl+Alt+B)"
+              onClick={() => setBrowserOpen((v) => !v)}>🌐</button>
           </div>
           <div className="topbar-info">
             <span className="pill">{agent.icon} {agent.name}</span>
@@ -565,10 +636,10 @@ export default function App() {
           </div>
         </header>
 
-        {tab === 'chat' ? (
-          <>
+        <div className="body">
+          <section className="chat-col">
             <div className="chat" ref={scrollRef}>
-              {messages.length === 0 && (
+              {blocks.length === 0 && (
                 <div className="empty">
                   <h2>{agent.icon} {agent.name}</h2>
                   <p>{agent.description}</p>
@@ -579,28 +650,33 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {messages.map((m, i) => {
-                if (m.role === 'notice') return <div key={i} className="msg notice">{String(m.content)}</div>;
-                if (m.role === 'tool') {
+
+              {blocks.map((b, i) => {
+                const key = `${active?.id}-${i}`;
+                if (b.kind === 'notice') return <div key={key} className="msg notice">{String(b.msg.content)}</div>;
+                if (b.kind === 'activity') return <div key={key}>{renderActivity(b, key)}</div>;
+                if (b.kind === 'user') {
                   return (
-                    <div key={i} className="msg tool">
-                      <div className="role">tool · {m.name}</div>
-                      <div className="content mono">{typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}</div>
-                      {m.image && <img className="tool-image" src={m.image} alt="snapshot" />}
+                    <div key={key} className="msg user">
+                      <div className="content">{typeof b.msg.content === 'string' ? b.msg.content : pretty(b.msg.content, 4000)}</div>
                     </div>
                   );
                 }
                 return (
-                  <div key={i} className={`msg ${m.role}`}>
-                    <div className="role">{m.role}</div>
-                    <div className="content">{typeof m.content === 'string' ? m.content : <pre className="mono">{JSON.stringify(m.content, null, 2)}</pre>}</div>
-                    {m.tool_calls && (
-                      <div className="tools">{m.tool_calls.map((t: any, k: number) => <span key={k} className="tool-chip">{t.function?.name}</span>)}</div>
-                    )}
+                  <div key={key} className="msg assistant">
+                    <div className="role">{agent.name}</div>
+                    <div className="content markdown">
+                      {typeof b.msg.content === 'string' ? <RichText text={b.msg.content} /> : pretty(b.msg.content, 6000)}
+                    </div>
                   </div>
                 );
               })}
-              {running && <div className="msg assistant"><div className="content">Thinking…</div></div>}
+
+              {running && (
+                <div className="thinking">
+                  <span className="spinner" /> Thinking…
+                </div>
+              )}
             </div>
 
             <div className="composer">
@@ -616,38 +692,44 @@ export default function App() {
                 <button className="btn ghost" onClick={() => active && updateSession(active.id, (s) => ({ ...s, messages: [] }))}>Clear</button>
               </div>
             </div>
-          </>
-        ) : (
-          <div className="browser-pane">
-            <div className="browser-bar">
-              <button className="btn icon" title="Kembali" onClick={() => void window.dsh.browser.action('back')} disabled={!browserState.canGoBack}>←</button>
-              <button className="btn icon" title="Maju" onClick={() => void window.dsh.browser.action('forward')} disabled={!browserState.canGoForward}>→</button>
-              <button className="btn icon" title="Muat ulang" onClick={() => void window.dsh.browser.action('reload')}>⟳</button>
-              <input className="url-input" value={urlInput} placeholder="Ketik alamat atau kata pencarian, lalu Enter…"
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void navigateBrowser(urlInput); } }} />
-              <button className="btn primary" onClick={() => void navigateBrowser(urlInput)}>Buka</button>
-              <button className="btn icon" title="DevTools" onClick={() => void window.dsh.browser.devtools()}>🛠</button>
-            </div>
-            <div className="browser-slot" ref={browserSlotRef}>
-              {!browserState.url && (
-                <div className="browser-placeholder">
-                  <div className="bp-icon">🌐</div>
-                  <h3>Browser tertanam</h3>
-                  <p>Halaman tampil di area ini. Ketik alamat di atas, atau minta agent "buka google.com".</p>
-                  <div className="suggestions">
-                    <button onClick={() => void navigateBrowser('google.com')}>google.com</button>
-                  </div>
+          </section>
+
+          {/* ============ BROWSER PANEL (collapsible) ============ */}
+          <section className={`browser-col ${browserOpen ? 'open' : 'closed'}`}>
+            {browserOpen ? (
+              <div className="browser-panel">
+                <div className="browser-bar">
+                  <button className="btn icon" title="Kembali" onClick={() => void window.dsh.browser.action('back')} disabled={!browserState.canGoBack}>←</button>
+                  <button className="btn icon" title="Maju" onClick={() => void window.dsh.browser.action('forward')} disabled={!browserState.canGoForward}>→</button>
+                  <button className="btn icon" title="Muat ulang" onClick={() => void window.dsh.browser.action('reload')}>⟳</button>
+                  <input className="url-input" value={urlInput} placeholder="Alamat atau kata pencarian…"
+                    onChange={(e) => setUrlInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void navigateBrowser(urlInput); } }} />
+                  <button className="btn primary" onClick={() => void navigateBrowser(urlInput)}>Buka</button>
+                  <button className="btn icon" title="Tutup browser (Ctrl+Alt+B)" onClick={() => setBrowserOpen(false)}>✕</button>
                 </div>
-              )}
-            </div>
-            {browserState.loading && <div className="browser-loading" />}
-            <div className="browser-status">
-              <span>{browserState.title || '(tanpa judul)'}</span>
-              <span className="muted">{browserState.url}</span>
-            </div>
-          </div>
-        )}
+                <div className="browser-slot" ref={browserSlotRef}>
+                  {!browserState.url && (
+                    <div className="browser-placeholder">
+                      <div className="bp-icon">🌐</div>
+                      <h3>Browser tertanam</h3>
+                      <p>Halaman tampil di panel ini. Bisa ditutup dengan tombol ✕ atau Ctrl+Alt+B.</p>
+                      <div className="suggestions"><button onClick={() => void navigateBrowser('google.com')}>google.com</button></div>
+                    </div>
+                  )}
+                </div>
+                <div className="browser-status">
+                  <span>{browserState.title || '(tanpa judul)'}</span>
+                  <span className="muted">{browserState.url}</span>
+                </div>
+              </div>
+            ) : (
+              <button className="browser-rail" title="Buka browser (Ctrl+Alt+B)" onClick={() => setBrowserOpen(true)}>
+                <span>🌐</span>
+              </button>
+            )}
+          </section>
+        </div>
       </main>
 
       {notice && <div className="toast">{notice}</div>}
@@ -665,7 +747,6 @@ export default function App() {
               </h3>
               <button className="btn icon" onClick={() => setPanel(null)}>✕</button>
             </div>
-
             <div className="modal-body">
               {panel === 'settings' && (
                 <div className="form">
@@ -703,7 +784,7 @@ export default function App() {
                     <input type="checkbox" checked={settings.autoLearn} onChange={(e) => setSettings((s) => ({ ...s, autoLearn: e.target.checked }))} />
                     Belajar otomatis (simpan memory & skill dari tiap sesi)
                   </label>
-                  <div className="hint">Versi {appVersion || '0.2.0'} · OflaBot</div>
+                  <div className="hint">Versi {appVersion || '0.2.1'} · OflaBot</div>
                 </div>
               )}
 
@@ -716,7 +797,7 @@ export default function App() {
                       <button className="btn ghost" onClick={async () => { await window.dsh.memory.clear(); void refreshMemory(); }}>Hapus semua</button>
                     </div>
                   </div>
-                  {memEntries.length === 0 && <div className="empty-small">Belum ada memory. Agent akan menyimpan otomatis setelah percakapan bermakna.</div>}
+                  {memEntries.length === 0 && <div className="empty-small">Belum ada memory. Agent menyimpannya otomatis setelah percakapan bermakna.</div>}
                   {memEntries.map((m) => (
                     <div key={m.id} className="card">
                       <div className="card-head">
@@ -733,9 +814,11 @@ export default function App() {
               {panel === 'skills' && (
                 <div className="list-panel">
                   <div className="install-box">
-                    <div className="hint">Pasang skill dari GitHub — mendukung format SKILL.md (Claude Code/Desktop, Codex, OpenCode, Hermes, VS Code).</div>
+                    <div className="hint">Pasang skill dari GitHub — format SKILL.md (Claude Code/Desktop, Codex, OpenCode, Hermes, VS Code).</div>
                     <div className="model-row">
-                      <input value={repoInput} placeholder="owner/repo atau https://github.com/owner/repo" onChange={(e) => setRepoInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void installSkills(); }} />
+                      <input value={repoInput} placeholder="owner/repo atau https://github.com/owner/repo"
+                        onChange={(e) => setRepoInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') void installSkills(); }} />
                       <button className="btn primary" onClick={() => void installSkills()} disabled={skillBusy}>Install</button>
                     </div>
                     <div className="row-gap">
@@ -745,7 +828,6 @@ export default function App() {
                     {skillMsg && <div className="hint">{skillMsg}</div>}
                     {skillsDir && <div className="hint mono">Folder skill: {skillsDir}</div>}
                   </div>
-
                   <div className="list-head"><span>{skillList.length} skill terpasang</span></div>
                   {skillList.length === 0 && <div className="empty-small">Belum ada skill. Tempel URL repo GitHub lalu klik Install.</div>}
                   {skillList.map((s) => (
@@ -766,13 +848,10 @@ export default function App() {
                 <div className="donate-panel">
                   <div className="donate-heart">❤</div>
                   <h4>Dukung pengembangan OflaBot</h4>
-                  <p>
-                    OflaBot gratis dan dikembangkan mandiri. Kalau aplikasi ini membantu pekerjaan Anda,
-                    dukungan lewat Saweria sangat berarti untuk biaya server, API, dan waktu pengembangan.
-                  </p>
+                  <p>OflaBot gratis dan dikembangkan mandiri. Kalau aplikasi ini membantu pekerjaan Anda, dukungan lewat Saweria sangat berarti untuk biaya server, API, dan waktu pengembangan.</p>
                   <div className="donate-actions">
-                    <button className="btn primary big" onClick={() => void window.dsh.openExternal(DONATE_URL)}>Buka Saweria</button>
-                    <button className="btn" onClick={() => { setTab('browser'); setPanel(null); void navigateBrowser(DONATE_URL); }}>Lihat di browser aplikasi</button>
+                    <button className="btn primary big" onClick={() => void openDonate()}>Buka Saweria</button>
+                    <button className="btn" onClick={() => { setPanel(null); setBrowserOpen(true); void navigateBrowser(DONATE_URL); }}>Buka di panel browser</button>
                   </div>
                   <div className="hint mono">{DONATE_URL}</div>
                   <div className="hint">Terima kasih atas dukungannya 🙏</div>
@@ -783,5 +862,19 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+/** Render teks assistant sederhana: **bold**, `kode`, dan baris baru. */
+function RichText({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (p.startsWith('**') && p.endsWith('**')) return <b key={i}>{p.slice(2, -2)}</b>;
+        if (p.startsWith('`') && p.endsWith('`')) return <code key={i} className="inline-code">{p.slice(1, -1)}</code>;
+        return <React.Fragment key={i}>{p}</React.Fragment>;
+      })}
+    </>
   );
 }
