@@ -157,6 +157,7 @@ Jalankan `uninstall.cmd` di folder instalasi (atau Start Menu → OflaBot → Un
 Yang dihapus: proses aplikasi, shortcut Desktop + Start Menu, entri registry,
 folder instalasi, serta cache/profil (`%APPDATA%\OflaBot`,
 `%APPDATA%\grokbot-desktop`, `%LOCALAPPDATA%\OflaBot`).
+
 ## 🛡 Keandalan agent (v0.2.3, diperkuat v0.2.7)
 
 Berdasarkan pembandingan dengan artefak OpenCode Desktop (`app.asar`: tool `todowrite`,
@@ -165,7 +166,7 @@ kompaksi konteks, penanganan `tool-error`) dan perilaku agent GrokBot:
 - **Pengaman loop**: panggilan tool dengan argumen sama (setelah dinormalisasi) tidak
   dieksekusi ulang — hasil sebelumnya dipakai (cache), agent diberi instruksi untuk
   mengubah pendekatan / bertanya. (Diuji dengan mock
-  provider yang selalu memanggil tool sama: berhenti di 3 panggilan, lanjut jawaban final.)
+  provider yang selalu memanggil tool sama: panggilan ke-2 memakai hasil cache, lalu lanjut jawaban final.)
 - **Retry provider** otomatis 3× untuk error transien (429/5xx/timeout).
 - **Respons kosong** tidak lagi menjadi bubble "(tanpa jawaban)" — muncul notifikasi jelas.
 - **Tanpa batas langkah tetap** (v0.2.6+): agent berjalan sampai Anda klik Stop, model error,
@@ -176,6 +177,7 @@ kompaksi konteks, penanganan `tool-error`) dan perilaku agent GrokBot:
   untuk tugas multi-langkah.
 - **exec** kini punya `timeoutMs` (default 120s) dan `cwd`, output dipotong 200 KB
   dengan penanda `truncated`/`timedOut`.
+
 ## 🧠 Engine agent (v0.2.7) — selaras DSH & OpenCode Desktop
 
 Hasil pembandingan langsung dengan kode DSH dan OpenCode Desktop (v2.2.7):
@@ -200,6 +202,7 @@ Hasil pembandingan langsung dengan kode DSH dan OpenCode Desktop (v2.2.7):
 - **Ctrl+V gambar**: handler `onPaste` + listener global + fallback IPC clipboard
   (`clipboard.read()` ClipboardItem → PNG). Gambar dinormalisasi (≤1600px / ≤3 MB)
   sebelum dikirim ke model vision.
+
 ## ➕ Menu composer (v0.2.5)
 
 Tombol **＋** di kotak pesan (mirip DSH):
@@ -219,6 +222,7 @@ Tombol **＋** di kotak pesan (mirip DSH):
 | 🧠 Model | pilih model (dropdown dari API provider) |
 | ⬇ Export | simpan log sesi (Markdown/JSON/ZIP) |
 | ▸ Shell command | jalankan perintah tanpa AI |
+
 ## ⚡ Token Saver (v0.2.6)
 
 Menu sidebar **⚡ Token Saver** — fitur hemat token yang bisa dinyalakan/dimatikan:
