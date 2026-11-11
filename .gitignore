@@ -33,3 +33,11 @@ installer/Setup2.exe
 .*-err.txt
 .mk*.ps1
 .of*
+
+# artefak uji lokal
+.mock-provider.cjs
+.fstest/
+.loop*.png
+.f*out.txt
+.f*err.txt
+.v23-*

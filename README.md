@@ -157,3 +157,20 @@ Jalankan `uninstall.cmd` di folder instalasi (atau Start Menu ? OflaBot ? Uninst
 Yang dihapus: proses aplikasi, shortcut Desktop + Start Menu, entri registry,
 folder instalasi, serta cache/profil (`%APPDATA%\OflaBot`,
 `%APPDATA%\grokbot-desktop`, `%LOCALAPPDATA%\OflaBot`).
+## ?? Keandalan agent (v0.2.3)
+
+Berdasarkan pembandingan dengan artefak OpenCode Desktop (`app.asar`: tool `todowrite`,
+kompaksi konteks, penanganan `tool-error`) dan perilaku agent GrokBot:
+
+- **Pengaman loop**: panggilan tool dengan nama+argumen sama ke-3× tidak dieksekusi;
+  agent diberi instruksi untuk mengubah pendekatan / bertanya. (Diuji dengan mock
+  provider yang selalu memanggil tool sama: berhenti di 3 panggilan, lanjut jawaban final.)
+- **Retry provider** otomatis 3× untuk error transien (429/5xx/timeout).
+- **Respons kosong** tidak lagi menjadi bubble "(tanpa jawaban)" — muncul notifikasi jelas.
+- **Batas langkah 26** + tombol **? Lanjutkan**.
+- **Tool file native** (menggantikan pola shell loop): `file_list`, `file_move`,
+  `file_mkdir`, `file_stat`.
+- **Todo/rencana tugas** (`todo_write`) tampil sebagai panel ?? — agent wajib memakainya
+  untuk tugas multi-langkah.
+- **exec** kini punya `timeoutMs` (default 120s) dan `cwd`, output dipotong 200 KB
+  dengan penanda `truncated`/`timedOut`.

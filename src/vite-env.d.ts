@@ -76,7 +76,13 @@ interface DshApi {
   memory: DshMemoryApi;
   skills: DshSkillsApi;
   screenshot: () => Promise<{ dataUrl?: string; error?: string }>;
-  exec: (cmd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => Promise<any>;
+  fs: {
+    list: (dir: string, opts?: { pattern?: string; max?: number }) => Promise<any>;
+    mkdir: (dir: string) => Promise<any>;
+    move: (src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }) => Promise<any>;
+    read: (file: string, maxBytes?: number) => Promise<any>;
+  };
   launch: (exe: string, args?: string[]) => Promise<any>;
   keys: (keys: string) => Promise<any>;
   mouse: (action: string, x?: number, y?: number, button?: string) => Promise<any>;

@@ -10,6 +10,15 @@ export type AgentDef = {
   tools: 'browser' | 'desktop' | 'all';
 };
 
+const WORK_RULES =
+  'ATURAN KERJA (PENTING): ' +
+  '1) Untuk tugas lebih dari 2 langkah, panggil todo_write DULU dengan rencana langkah, lalu update statusnya setiap selesai satu langkah. ' +
+  '2) Operasi file WAJIB pakai tool native: file_list (daftar/pola), file_stat (baca), file_move (pindah/copy, otomatis buat folder), file_mkdir. ' +
+  'JANGAN pakai shell "dir", "move", "copy", "mkdir" berulang-ulang — itu penyebab loop. ' +
+  '3) exec hanya untuk hal yang tidak ada tool-nya; beri timeoutMs dan cwd bila perlu, dan pecah perintah besar menjadi langkah kecil. ' +
+  '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 2×. Kalau gagal, ubah pendekatan atau tanya pengguna. ' +
+  '5) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada).';
+
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +
   '1) Setiap kali menemukan fakta penting tentang pengguna/lingkungan atau preferensi, panggil memory_save (kind="memory"). ' +
@@ -29,7 +38,7 @@ export const AGENTS: AgentDef[] = [
       'Kamu adalah OflaBot, AI agent desktop di Windows. ' +
       'Kamu punya browser tertanam (browser_open, browser_text, browser_snapshot, browser_click, browser_fill, browser_action) â€” SELALU buka website lewat browser_open, jangan pakai Edge/Chrome eksternal. ' +
       'Kamu juga bisa screenshot layar, kontrol mouse/keyboard, jalankan perintah, buka aplikasi, dan baca/tulis file. ' +
-      MEMORY_RULES + ' ' +
+      WORK_RULES + ' ' + MEMORY_RULES + ' ' +
       'Konfirmasi dulu sebelum aksi berbahaya/merusak. Jawab ringkas dalam bahasa pengguna dan laporkan hasil akhir dengan jelas.',
   },
   {
@@ -42,7 +51,7 @@ export const AGENTS: AgentDef[] = [
       'Kamu adalah Web Agent OflaBot. Fokus hanya pada browser tertanam di dalam aplikasi. ' +
       'Gunakan browser_open untuk membuka URL, browser_text untuk membaca isi halaman, browser_snapshot untuk melihat tampilan, ' +
       'browser_click/browser_fill untuk berinteraksi, browser_action untuk back/forward/reload. Jangan pakai browser eksternal. ' +
-      MEMORY_RULES + ' ' +
+      WORK_RULES + ' ' + MEMORY_RULES + ' ' +
       'Ringkas jawaban: URL, isi penting, dan langkah berikutnya.',
   },
   {
@@ -54,7 +63,7 @@ export const AGENTS: AgentDef[] = [
     system:
       'Kamu adalah Desktop Agent OflaBot untuk Windows. Tugasmu mengoperasikan komputer: membuka aplikasi (launch), menjalankan perintah (exec), ' +
       'menggerakkan mouse, mengetik, mengirim tombol, membaca/menulis file. ' +
-      MEMORY_RULES + ' ' +
+      WORK_RULES + ' ' + MEMORY_RULES + ' ' +
       'Selalu minta konfirmasi untuk aksi berbahaya. Jangan membuka website lewat browser eksternal; arahkan ke browser tertanam aplikasi.',
   },
   {
@@ -66,7 +75,7 @@ export const AGENTS: AgentDef[] = [
     system:
       'Kamu adalah Coder Agent OflaBot. Fokus pada penulisan dan perbaikan kode: baca file dulu sebelum mengubah, tulis perubahan minimal, ' +
       'jelaskan hasil. Gunakan exec untuk menjalankan test/build. ' +
-      MEMORY_RULES + ' ' +
+      WORK_RULES + ' ' + MEMORY_RULES + ' ' +
       'Minta konfirmasi sebelum menulis file atau menjalankan perintah.',
   },
   {
@@ -78,7 +87,7 @@ export const AGENTS: AgentDef[] = [
     system:
       'Kamu adalah Researcher Agent OflaBot. Lakukan riset dengan membuka beberapa sumber di browser tertanam (browser_open), ' +
       'baca isinya (browser_text), bandingkan, lalu buat rangkuman terstruktur dengan sumber (URL). ' +
-      MEMORY_RULES + ' ' +
+      WORK_RULES + ' ' + MEMORY_RULES + ' ' +
       'Simpan temuan penting sebagai memory (kind="memory") dan prosedur riset yang berhasil sebagai skill.',
   },
 ];
@@ -88,8 +97,8 @@ export function getAgent(id: string): AgentDef {
 }
 
 const browserTools = ['browser_open', 'browser_action', 'browser_snapshot', 'browser_text', 'browser_click', 'browser_fill'];
-const desktopTools = ['screenshot', 'exec', 'launch', 'mouse', 'type', 'keys', 'file_read', 'file_write'];
-const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read'];
+const desktopTools = ['screenshot', 'exec', 'launch', 'mouse', 'type', 'keys', 'file_read', 'file_write', 'file_list', 'file_move', 'file_mkdir', 'file_stat', 'todo_write'];
+const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'todo_write'];
 
 // Tool yang tersedia per tipe agent (memory selalu tersedia).
 export function toolNamesFor(kind: AgentDef['tools']): string[] {

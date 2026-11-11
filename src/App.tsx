@@ -172,6 +172,8 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [autoApprove, setAutoApprove] = useState(false);
+  const [todos, setTodos] = useState<{ content: string; status: string }[]>([]);
+  const [stepLimitHit, setStepLimitHit] = useState(false);
 
   // model dropdown
   const [models, setModels] = useState<string[]>([]);
@@ -306,6 +308,7 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [active?.messages.length, running]);
+  useEffect(() => { setStepLimitHit(false); }, [activeId]);
 
   // ---------------- helpers ----------------
   const updateSession = useCallback((id: string, fn: (s: Session) => Session) => {
@@ -395,7 +398,27 @@ export default function App() {
     appendMessage(sessionId, { role: 'user', content: userText, ts: Date.now() });
 
     let steps = 0;
-    while (steps < 30 && !abortRef.current) {
+    const sigCounts = new Map<string, number>();
+    let hitLimit = false;
+    let lastError = '';
+
+    const callModel = async (payload: any) => {
+      // Retry untuk error transien (rate limit / 5xx / jaringan).
+      let last: any = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const r = await window.dsh.chat(payload);
+        if (!r?.error) return r;
+        last = r;
+        const raw = JSON.stringify(r.error || '');
+        const transient = /\b(429|500|502|503|504|ECONN|ETIMEDOUT|timeout|overloaded|rate.?limit)\b/i.test(raw);
+        if (!transient || abortRef.current || attempt === 2) break;
+        appendMessage(sessionId, { role: 'notice', content: `Provider sibuk (${attempt + 1}/3), mencoba lagi…` });
+        await new Promise((res) => setTimeout(res, 1200 * (attempt + 1)));
+      }
+      return last;
+    };
+
+    while (steps < 26 && !abortRef.current) {
       steps++;
       const payload = {
         provider: isAnthropic ? 'anthropic' : 'openai',
@@ -408,9 +431,10 @@ export default function App() {
         tool_choice: isAnthropic ? undefined : 'auto',
       };
 
-      const resp = await window.dsh.chat(payload);
+      const resp = await callModel(payload);
       if (resp?.error) {
-        appendMessage(sessionId, { role: 'notice', content: 'Error provider: ' + JSON.stringify(resp.error).slice(0, 600) });
+        lastError = JSON.stringify(resp.error).slice(0, 600);
+        appendMessage(sessionId, { role: 'notice', content: 'Error provider: ' + lastError });
         break;
       }
 
@@ -427,6 +451,28 @@ export default function App() {
           let args: any = {};
           try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
 
+          // --- Pengaman loop: panggilan identik berulang ---
+          const sig = name + '|' + JSON.stringify(args);
+          const seen = (sigCounts.get(sig) || 0) + 1;
+          sigCounts.set(sig, seen);
+
+          const pushToolResult = (payload: any) => {
+            const s = JSON.stringify(payload).slice(0, 6000);
+            msgs.push({ role: 'tool', tool_call_id: tc.id, content: s, name });
+            appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: s });
+          };
+
+          if (seen >= 3) {
+            pushToolResult({
+              error: 'loop terdeteksi',
+              hint:
+                `Panggilan ${name} dengan argumen yang sama sudah ${seen}× tanpa hasil baru. ` +
+                'JANGAN ulangi. Ubah pendekatan (mis. pakai file_list/file_move atau exec dengan perintah berbeda), ' +
+                'atau jelaskan ke pengguna kendala yang dihadapi dan minta klarifikasi.',
+            });
+            continue;
+          }
+
           const fullAccess = settings.accessMode === 'full' || autoApprove;
           if (isDangerous(name, args) && !fullAccess) {
             const ok = await window.dsh.confirm(
@@ -438,14 +484,23 @@ export default function App() {
               flash('Full Access aktif untuk sesi ini — tidak akan bertanya lagi.');
             }
             if (!ok) {
-              const denied = { error: 'dibatalkan pengguna' };
-              msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(denied), name });
-              appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: JSON.stringify(denied) });
+              pushToolResult({ error: 'dibatalkan pengguna' });
               continue;
             }
           }
 
-          const result = await runTool(name, args);
+          let result: any;
+          try {
+            result = await runTool(name, args);
+          } catch (err: any) {
+            result = { error: 'tool gagal: ' + (err?.message || String(err)) };
+          }
+
+          if (name === 'todo_write') {
+            const list = Array.isArray(result?.todos) ? result.todos : Array.isArray(args.todos) ? args.todos : [];
+            setTodos(list);
+          }
+
           const image = extractImage(result);
           const clean = { ...result };
           if (clean.dataUrl) clean.dataUrl = '(gambar terkirim terpisah)';
@@ -463,12 +518,28 @@ export default function App() {
         continue;
       }
 
+      // --- Tidak ada tool call: ini jawaban akhir ---
+      if (!text.trim()) {
+        appendMessage(sessionId, {
+          role: 'notice',
+          content: 'Model tidak mengembalikan jawaban (respons kosong). Coba kirim ulang, atau ganti model/provider di Settings.',
+        });
+        break;
+      }
+
       msgs.push({ role: 'assistant', content: text });
-      appendMessage(sessionId, { role: 'assistant', content: text || '(tanpa jawaban)' });
+      appendMessage(sessionId, { role: 'assistant', content: text });
       break;
     }
 
-    if (steps >= 30) appendMessage(sessionId, { role: 'notice', content: 'Batas 30 langkah agent tercapai. Kirim instruksi lanjutan.' });
+    if (steps >= 26) {
+      hitLimit = true;
+      appendMessage(sessionId, {
+        role: 'notice',
+        content: 'Batas 26 langkah tercapai. Klik tombol "Lanjutkan" atau kirim "lanjutkan" untuk melanjutkan, atau uraikan tugas menjadi bagian lebih kecil.',
+      });
+    }
+    setStepLimitHit(hitLimit);
     setRunning(false);
     void refreshMemory();
   }
@@ -511,6 +582,7 @@ export default function App() {
     if (!settings.model) { setPanel('settings'); flash('Pilih model AI dulu.'); return; }
 
     setInput('');
+    setStepLimitHit(false);
     updateSession(active.id, (s) => ({ ...s, title: s.messages.length === 0 ? sessionTitle(text) : s.title }));
     const snapshot = active;
     await agentLoop(snapshot.id, text, getAgent(snapshot.agentId));
@@ -659,6 +731,24 @@ export default function App() {
         <div className="body">
           <section className="chat-col">
             <div className="chat" ref={scrollRef}>
+              {todos.length > 0 && (
+                <div className="todo-card">
+                  <div className="todo-head">
+                    <span>📋 Rencana Tugas</span>
+                    <span className="muted">
+                      {todos.filter((t) => t.status === 'completed').length}/{todos.length}
+                    </span>
+                  </div>
+                  {todos.map((t, i) => (
+                    <div key={i} className={`todo-item ${t.status}`}>
+                      <span className="todo-mark">
+                        {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '◐' : '○'}
+                      </span>
+                      <span>{t.content}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {blocks.length === 0 && (
                 <div className="empty">
                   <h2>{agent.icon} {agent.name}</h2>
@@ -709,6 +799,11 @@ export default function App() {
               <div className="composer-actions">
                 <button className="btn primary" onClick={() => void send()} disabled={running}>Send</button>
                 <button className="btn" onClick={() => { abortRef.current = true; }} disabled={!running}>Stop</button>
+                {stepLimitHit && !running && (
+                  <button className="btn continue" onClick={() => { setInput('lanjutkan'); setTimeout(() => void send(), 60); }}>
+                    ▶ Lanjutkan
+                  </button>
+                )}
                 <button className="btn ghost" onClick={() => active && updateSession(active.id, (s) => ({ ...s, messages: [] }))}>Clear</button>
               </div>
             </div>

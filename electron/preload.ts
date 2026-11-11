@@ -36,7 +36,13 @@ contextBridge.exposeInMainWorld('dsh', {
 
   // --- desktop tools ---
   screenshot: () => ipcRenderer.invoke('tool:screenshot'),
-  exec: (cmd: string) => ipcRenderer.invoke('tool:exec', cmd),
+  exec: (cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => ipcRenderer.invoke('tool:exec', cmd, opts),
+  fs: {
+    list: (dir: string, opts?: any) => ipcRenderer.invoke('fs:list', dir, opts),
+    mkdir: (dir: string) => ipcRenderer.invoke('fs:mkdir', dir),
+    move: (src: string, dest: string, opts?: any) => ipcRenderer.invoke('fs:move', src, dest, opts),
+    read: (file: string, maxBytes?: number) => ipcRenderer.invoke('fs:read', file, maxBytes),
+  },
   launch: (exe: string, args?: string[]) => ipcRenderer.invoke('tool:launch', exe, args),
   keys: (keys: string) => ipcRenderer.invoke('tool:keys', keys),
   mouse: (action: string, x?: number, y?: number, button?: string) => ipcRenderer.invoke('tool:mouse', action, x, y, button),

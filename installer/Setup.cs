@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("OflaBot")]
 [assembly: AssemblyCompany("OflaBot")]
 [assembly: AssemblyDescription("Installer OflaBot")]
-[assembly: AssemblyVersion("0.2.2.0")]
-[assembly: AssemblyFileVersion("0.2.2.0")]
+[assembly: AssemblyVersion("0.2.3.0")]
+[assembly: AssemblyFileVersion("0.2.3.0")]
 
 // OflaBot - installer (single-file, payload ter-embed).
 // Fitur: pilih folder instalasi, shortcut Desktop + Start Menu (dengan fallback
@@ -26,7 +26,7 @@ static class Setup
     const string AppExe = "OflaBot.exe";          // launcher (aman SmartScreen)
     const string CoreExe = "OflaBot-core.exe";    // binary Electron
     const string Publisher = "OflaBot";
-    const string Version = "0.2.2";
+    const string Version = "0.2.3";
     const string UninstKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\OflaBot";
     const string AppArgs = "--no-sandbox";
 

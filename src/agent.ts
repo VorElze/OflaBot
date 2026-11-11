@@ -62,6 +62,66 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'todo_write',
+      description:
+        'Buat/perbarui daftar tugas (todo) untuk pekerjaan multi-langkah. WAJIB dipakai untuk tugas kompleks (>2 langkah) agar progres terlihat dan tidak mengulang langkah. Kirim SELURUH daftar setiap kali update.',
+      parameters: {
+        type: 'object',
+        properties: {
+          todos: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                content: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+              },
+              required: ['content', 'status'],
+            },
+          },
+        },
+        required: ['todos'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_list',
+      description: 'Daftar file/folder (rekursif maks 3 level) tanpa shell. Lebih aman & cepat daripada exec dir. pattern: filter nama, mis. "*.png".',
+      parameters: { type: 'object', properties: { dir: { type: 'string' }, pattern: { type: 'string' }, max: { type: 'number' } }, required: ['dir'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_move',
+      description: 'Pindahkan (atau copy) file/folder dan otomatis membuat folder tujuan. Pakai ini untuk merapikan/memindahkan file, bukan shell move/copy.',
+      parameters: {
+        type: 'object',
+        properties: { src: { type: 'string' }, dest: { type: 'string' }, overwrite: { type: 'boolean' }, copy: { type: 'boolean' } },
+        required: ['src', 'dest'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_mkdir',
+      description: 'Buat folder (rekursif).',
+      parameters: { type: 'object', properties: { dir: { type: 'string' } }, required: ['dir'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_stat',
+      description: 'Baca isi file teks (maks 200 KB) untuk inspeksi cepat tanpa shell.',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, maxBytes: { type: 'number' } }, required: ['path'] },
+    },
+  },  {
+    type: 'function',
+    function: {
       name: 'screenshot',
       description: 'Ambil screenshot SELURUH layar desktop (bukan hanya browser).',
       parameters: { type: 'object', properties: {}, required: [] },
@@ -71,8 +131,8 @@ export const TOOLS = [
     type: 'function',
     function: {
       name: 'exec',
-      description: 'Jalankan perintah shell (cmd.exe) di Windows. Mengembalikan stdout/stderr/exit code.',
-      parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] },
+      description: 'Jalankan perintah shell (cmd.exe) di Windows. Mengembalikan stdout/stderr/exit code. timeoutMs default 120000, cwd opsional. Untuk daftar/pindah file gunakan file_list/file_move (lebih aman).',
+      parameters: { type: 'object', properties: { cmd: { type: 'string' }, timeoutMs: { type: 'number' }, cwd: { type: 'string' } }, required: ['cmd'] },
     },
   },
   {
@@ -204,7 +264,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_fill',
 ];
 
-export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read'];
+export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'todo_write', 'file_list', 'file_stat'];
 
 export async function runTool(name: string, args: any): Promise<any> {
   const b = window.dsh.browser;
@@ -223,14 +283,23 @@ export async function runTool(name: string, args: any): Promise<any> {
     }
     case 'skill_read':
       return sk.read(args.slug);
-    case 'browser_open': return b.tool('open', { url: args.url });
+    case 'todo_write':
+      return { ok: true, todos: Array.isArray(args.todos) ? args.todos : [] };
+    case 'file_list':
+      return window.dsh.fs.list(args.dir, { pattern: args.pattern, max: args.max });
+    case 'file_move':
+      return window.dsh.fs.move(args.src, args.dest, { overwrite: !!args.overwrite, copy: !!args.copy });
+    case 'file_mkdir':
+      return window.dsh.fs.mkdir(args.dir);
+    case 'file_stat':
+      return window.dsh.fs.read(args.path, args.maxBytes);    case 'browser_open': return b.tool('open', { url: args.url });
     case 'browser_action': return b.tool(args.action);
     case 'browser_snapshot': return b.tool('snapshot');
     case 'browser_text': return b.tool('text');
     case 'browser_click': return b.tool('click', { selector: args.selector, text: args.text });
     case 'browser_fill': return b.tool('fill', { selector: args.selector, value: args.value });
     case 'screenshot': return window.dsh.screenshot();
-    case 'exec': return window.dsh.exec(args.cmd);
+    case 'exec': return window.dsh.exec(args.cmd, { timeoutMs: args.timeoutMs, cwd: args.cwd });
     case 'launch': return window.dsh.launch(args.exe, args.args);
     case 'mouse': return window.dsh.mouse(args.action, args.x, args.y, args.button);
     case 'type': return window.dsh.type(args.text);

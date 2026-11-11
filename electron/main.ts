@@ -187,6 +187,19 @@ app.whenReady().then(() => {
               out.modelsCount = (mo.models || []).length;
             } catch (e) { out.modelsErr = String(e); }
             try { out.appInfo = await window.dsh.appInfo(); } catch (e) { out.appInfoErr = String(e); }
+            try {
+              const lst = await window.dsh.fs.list('D:/DeepSeek/aplikasi/src', { max: 50 });
+              out.fsList = { count: lst.count, sample: (lst.entries || []).slice(0, 3).map((x) => x.name) };
+              const tmp = 'D:/DeepSeek/aplikasi/.fstest';
+              out.fsMkdir = await window.dsh.fs.mkdir(tmp);
+              out.fsMove = await window.dsh.fs.move('D:/DeepSeek/aplikasi/package.json', tmp + '/pkg.json', { copy: true, overwrite: true });
+              const rd = await window.dsh.fs.read(tmp + '/pkg.json', 80);
+              out.fsRead = (rd.content || '').slice(0, 40);
+            } catch (e) { out.fsErr = String(e); }
+            try {
+              const ex = await window.dsh.exec('echo halo-dari-exec', { timeoutMs: 10000 });
+              out.exec = { code: ex.code, stdout: String(ex.stdout || '').trim() };
+            } catch (e) { out.execErr = String(e); }
             return out;
           })()`);
           console.log('FEATURES ' + JSON.stringify(feats));
@@ -223,6 +236,43 @@ app.whenReady().then(() => {
         if (process.env.OFLABOT_SMOKE_OPEN) {
           const res = await win!.webContents.executeJavaScript(`window.dsh.openExternal('https://saweria.co/OflaCo')`);
           console.log('OPEN_EXTERNAL ' + JSON.stringify(res));
+        }
+
+        // Uji pengaman loop: pakai provider mock yang selalu memanggil tool yang sama.
+        if (process.env.OFLABOT_SMOKE_LOOP) {
+          await win!.webContents.executeJavaScript(`(() => {
+            const settings = { provider: 'custom', baseUrl: 'http://127.0.0.1:18999', apiKey: 'mock', model: 'mock-loop', autoLearn: false, accessMode: 'full' };
+            localStorage.setItem('oflabot.settings.v1', JSON.stringify(settings));
+            localStorage.setItem('oflabot.sessions.v1', JSON.stringify([{ id: 'loop-test', title: 'loop test', agentId: 'oflabot', messages: [], createdAt: Date.now(), updatedAt: Date.now() }]));
+            localStorage.setItem('oflabot.active-session.v1', 'loop-test');
+            return true;
+          })()`);
+          await win!.webContents.reload();
+          await new Promise((r) => setTimeout(r, 2500));
+          await win!.webContents.executeJavaScript(`(() => {
+            const ta = document.querySelector('.composer textarea');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(ta, 'rapikan file di C lalu pindahkan ke D');
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('.composer-actions .btn.primary').click();
+            return true;
+          })()`);
+          await new Promise((r) => setTimeout(r, 12000));
+          const loopInfo = await win!.webContents.executeJavaScript(`(() => {
+            const raw = JSON.parse(localStorage.getItem('oflabot.sessions.v1') || '[]');
+            const msgs = (raw[0] || {}).messages || [];
+            const toolMsgs = msgs.filter((m) => m.role === 'tool');
+            const notices = msgs.filter((m) => m.role === 'notice').map((m) => String(m.content));
+            const assistant = msgs.filter((m) => m.role === 'assistant');
+            return {
+              total: msgs.length,
+              tools: toolMsgs.length,
+              loopHints: toolMsgs.filter((m) => String(m.content || '').includes('loop terdeteksi')).length,
+              notices,
+              lastAssistant: String((assistant[assistant.length - 1] || {}).content || '').slice(0, 160),
+            };
+          })()`);
+          console.log('LOOP_TEST ' + JSON.stringify(loopInfo));
         }
 
         const img = await win!.webContents.capturePage();
@@ -513,15 +563,106 @@ ipcMain.handle('tool:screenshot', async () => {
 });
 
 // ---- Run shell command ----
-ipcMain.handle('tool:exec', async (_e, cmd: string) => {
+ipcMain.handle('tool:exec', async (_e, cmd: string, opts?: { timeoutMs?: number; cwd?: string }) => {
+  const timeoutMs = Math.min(Math.max(opts?.timeoutMs ?? 120000, 1000), 600000);
+  const MAX_OUT = 200_000;
   return new Promise((resolve) => {
-    const p = spawn('cmd.exe', ['/c', cmd], { shell: false });
-    let out = '', err = '';
-    p.stdout.on('data', d => out += d);
-    p.stderr.on('data', d => err += d);
-    p.on('close', code => resolve({ code, stdout: out, stderr: err }));
-    setTimeout(() => { try { p.kill(); } catch {} resolve({ code: -1, stdout: out, stderr: err + '\ntimeout' }); }, 30000);
+    let finished = false;
+    const done = (payload: any) => { if (!finished) { finished = true; resolve(payload); } };
+    try {
+      const p = spawn('cmd.exe', ['/c', cmd], {
+        shell: false,
+        cwd: opts?.cwd || undefined,
+        windowsHide: true,
+      });
+      let out = '', err = '';
+      let truncated = false;
+      p.stdout.on('data', (d) => { out += d; if (out.length > MAX_OUT) { out = out.slice(0, MAX_OUT); truncated = true; } });
+      p.stderr.on('data', (d) => { err += d; if (err.length > MAX_OUT) { err = err.slice(0, MAX_OUT); truncated = true; } });
+      p.on('error', (e: any) => done({ code: -1, stdout: out, stderr: (err + '\n' + (e?.message || String(e))).trim(), error: e?.message || String(e) }));
+      p.on('close', (code) => done({ code, stdout: out, stderr: err, truncated }));
+      setTimeout(() => {
+        try { p.kill(); } catch { /* ignore */ }
+        done({ code: -1, stdout: out, stderr: err, timedOut: true, note: `Perintah dihentikan setelah ${Math.round(timeoutMs / 1000)}s. Pecah jadi langkah kecil atau pakai tool file_* / file_list.` });
+      }, timeoutMs);
+    } catch (e: any) {
+      done({ code: -1, stdout: '', stderr: e?.message || String(e), error: e?.message || String(e) });
+    }
   });
+});
+
+// ===========================================================================
+// Tool file-system native (menggantikan pola shell loop; seperti read/glob/move
+// di OpenCode) — lebih aman dan hemat langkah.
+// ===========================================================================
+ipcMain.handle('fs:list', async (_e, dir: string, opts?: { pattern?: string; max?: number }) => {
+  const fsP = await import('fs/promises');
+  try {
+    const target = dir || process.cwd();
+    const max = Math.min(opts?.max ?? 500, 5000);
+    const out: any[] = [];
+    async function walk(cur: string, depth: number) {
+      if (out.length >= max || depth > 3) return;
+      let entries: any[] = [];
+      try { entries = await fsP.readdir(cur, { withFileTypes: true }); } catch { return; }
+      for (const ent of entries) {
+        if (out.length >= max) return;
+        const full = path.join(cur, ent.name);
+        let size = 0;
+        try { if (ent.isFile()) size = (await fsP.stat(full)).size; } catch { /* ignore */ }
+        out.push({ path: full, name: ent.name, dir: ent.isDirectory(), size });
+        if (ent.isDirectory()) await walk(full, depth + 1);
+      }
+    }
+    await walk(target, 0);
+    const pattern = (opts?.pattern || '').trim();
+    const filtered = pattern
+      ? out.filter((f) => {
+          const rx = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+          return rx.test(f.name);
+        })
+      : out;
+    return { ok: true, base: target, count: filtered.length, truncated: filtered.length >= max, entries: filtered.slice(0, max) };
+  } catch (e: any) {
+    return { error: e?.message || String(e) };
+  }
+});
+
+ipcMain.handle('fs:mkdir', async (_e, dir: string) => {
+  const fsP = await import('fs/promises');
+  try {
+    await fsP.mkdir(dir, { recursive: true });
+    return { ok: true, dir };
+  } catch (e: any) { return { error: e?.message || String(e) }; }
+});
+
+ipcMain.handle('fs:move', async (_e, src: string, dest: string, opts?: { overwrite?: boolean; copy?: boolean }) => {
+  const fsP = await import('fs/promises');
+  try {
+    const s = path.resolve(src);
+    const d = path.resolve(dest);
+    if (s === d) return { ok: true, note: 'sumber = tujuan' };
+    await fsP.mkdir(path.dirname(d), { recursive: true });
+    const exists = await fsP.stat(d).then(() => true).catch(() => false);
+    if (exists && !opts?.overwrite) return { error: 'tujuan sudah ada: ' + d, hint: 'set overwrite=true atau ganti nama tujuan' };
+    if (opts?.copy) await fsP.cp(s, d, { recursive: true, force: !!opts?.overwrite });
+    else await fsP.rename(s, d);
+    return { ok: true, from: s, to: d, copy: !!opts?.copy };
+  } catch (e: any) { return { error: e?.message || String(e) }; }
+});
+
+ipcMain.handle('fs:read', async (_e, file: string, maxBytes?: number) => {
+  const fsP = await import('fs/promises');
+  try {
+    const st = await fsP.stat(file);
+    if (st.isDirectory()) return { error: 'ini folder, gunakan file_list' };
+    const limit = Math.min(maxBytes ?? 200_000, 2_000_000);
+    const fh = await fsP.open(file, 'r');
+    const buf = Buffer.alloc(Math.min(limit, st.size));
+    await fh.read(buf, 0, buf.length, 0);
+    await fh.close();
+    return { ok: true, path: file, size: st.size, truncated: st.size > limit, content: buf.toString('utf8') };
+  } catch (e: any) { return { error: e?.message || String(e) }; }
 });
 
 // ---- Launch app / URL ----
