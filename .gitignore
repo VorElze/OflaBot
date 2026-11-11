@@ -27,3 +27,9 @@ installer/Setup2.exe
 *.tmp
 .smoke*.png
 .ud*.png
+
+# file uji lokal
+.*-out.txt
+.*-err.txt
+.mk*.ps1
+.of*
