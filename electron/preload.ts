@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld('dsh', {
     edit: (file: string, opts?: any) => ipcRenderer.invoke('fs:edit', file, opts),
     glob: (dir: string, opts?: any) => ipcRenderer.invoke('fs:glob', dir, opts),
     search: (dir: string, opts?: any) => ipcRenderer.invoke('fs:search', dir, opts),
+    patch: (changes: any[]) => ipcRenderer.invoke('fs:patch', changes),
+  },
+  web: {
+    search: (cfg: any, query: string, count?: number) => ipcRenderer.invoke('web:search', cfg, query, count),
   },
   launch: (exe: string, args?: string[]) => ipcRenderer.invoke('tool:launch', exe, args),
   keys: (keys: string) => ipcRenderer.invoke('tool:keys', keys),

@@ -92,6 +92,10 @@ interface DshApi {
     edit: (file: string, opts?: { oldText?: string; newText?: string; replaceAll?: boolean }) => Promise<any>;
     glob: (dir: string, opts?: { pattern?: string; max?: number; depth?: number }) => Promise<any>;
     search: (dir: string, opts?: { query?: string; pattern?: string; max?: number; ignoreCase?: boolean; regex?: boolean; depth?: number }) => Promise<any>;
+    patch: (changes: any[]) => Promise<any>;
+  };
+  web: {
+    search: (cfg: { provider?: string; apiKey?: string; baseUrl?: string }, query: string, count?: number) => Promise<any>;
   };
   launch: (exe: string, args?: string[]) => Promise<any>;
   keys: (keys: string) => Promise<any>;

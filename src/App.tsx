@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { TOOLS, runTool, isDangerous, extractImage } from './agent';
+import { TOOLS, runTool, isDangerous, extractImage, setAgentRuntime } from './agent';
 import { AGENTS, getAgent, toolNamesFor, type AgentDef } from './agents';
 import { PROVIDERS, getProvider, isAnthropicLike } from './providers';
 
@@ -7,10 +7,14 @@ type Role = 'user' | 'assistant' | 'tool' | 'system' | 'notice';
 type Msg = { role: Role; content: any; name?: string; tool_call_id?: string; tool_calls?: any[]; image?: string; ts?: number };
 type Session = { id: string; title: string; agentId: string; messages: Msg[]; createdAt: number; updatedAt: number; goal?: string; planMode?: boolean };
 type Permission = 'read-only' | 'workspace' | 'full';
+type RuleAction = 'allow' | 'ask' | 'deny';
+type PermissionRule = { id: string; tool: string; pattern: string; action: RuleAction };
 type Settings = {
   provider: string; baseUrl: string; apiKey: string; model: string;
   autoLearn: boolean; accessMode: 'normal' | 'full'; permission: Permission;
   tokenSaver: { rtk: boolean; caveman: boolean; ponytail: boolean };
+  rules: PermissionRule[];
+  webSearch: { provider: string; apiKey: string; baseUrl: string };
 };
 
 type ActivityItem = { name: string; args?: any; result?: any; image?: string; denied?: boolean };
@@ -49,6 +53,8 @@ function loadSettings(): Settings {
   provider: 'openai', baseUrl: 'https://api.openai.com', apiKey: '', model: 'gpt-4o',
   autoLearn: true, accessMode: 'normal', permission: 'workspace',
   tokenSaver: { rtk: true, caveman: false, ponytail: false },
+  rules: [],
+  webSearch: { provider: 'duckduckgo', apiKey: '', baseUrl: '' },
 };
   try {
     const raw = readKey(SETTINGS_KEY, LEGACY.settings);
@@ -68,6 +74,20 @@ function loadSettings(): Settings {
             rtk: p.tokenSaver?.rtk !== false,
             caveman: p.tokenSaver?.caveman === true,
             ponytail: p.tokenSaver?.ponytail === true,
+          },
+          rules: Array.isArray(p.rules)
+            ? p.rules.filter((r: any) => r && typeof r === 'object')
+              .map((r: any) => ({
+                id: String(r.id || uid()),
+                tool: String(r.tool || '*'),
+                pattern: String(r.pattern || '*'),
+                action: (r.action === 'allow' || r.action === 'deny' ? r.action : 'ask') as RuleAction,
+              }))
+            : [],
+          webSearch: {
+            provider: String(p.webSearch?.provider || 'duckduckgo'),
+            apiKey: String(p.webSearch?.apiKey || ''),
+            baseUrl: String(p.webSearch?.baseUrl || ''),
           },
         };
       }
@@ -243,8 +263,9 @@ function toolCategory(name: string): { key: string; label: string } {
   if (n === 'file_glob' || n === 'file_search') return { key: 'search', label: 'Mencari file' };
   if (n === 'exec' || n === 'launch') return { key: 'commands', label: 'Menjalankan perintah' };
   if (n === 'file_move' || n === 'file_copy' || n === 'file_write' || n === 'file_mkdir' || n === 'file_edit' || n === 'file_delete') return { key: 'write', label: 'Mengubah file' };
-  if (n.startsWith('browser_')) return { key: 'web', label: 'Menjelajah web' };
+  if (n.startsWith('browser_') || n === 'web_search') return { key: 'web', label: 'Menjelajah web' };
   if (n.startsWith('memory_') || n.startsWith('skill_')) return { key: 'memory', label: 'Mengingat hal penting' };
+  if (n === 'spawn_subagents') return { key: 'subagents', label: 'Menjalankan sub-agent' };
   if (n === 'todo_write' || n === 'session_log') return { key: 'plan', label: 'Menyusun rencana' };
   if (n === 'ask_user') return { key: 'ask', label: 'Menanyakan ke pengguna' };
   if (n === 'screenshot' || n === 'mouse' || n === 'type' || n === 'keys') return { key: 'desktop', label: 'Mengoperasikan layar' };
@@ -274,6 +295,7 @@ function activitySummary(items: ActivityItem[]): string {
 const READ_ONLY_TOOLS = new Set([
   'file_list', 'file_glob', 'file_search', 'file_stat', 'file_read', 'browser_text', 'browser_snapshot',
   'browser_open', 'memory_search', 'skill_list', 'skill_read', 'session_log', 'screenshot', 'ask_user',
+  'web_search', 'spawn_subagents',
 ]);
 
 /**
@@ -316,7 +338,7 @@ function execVerb(cmd: string): string {
 
 /** Apakah panggilan ini mengubah sesuatu? Kalau tidak, tidak dihitung sebagai kemajuan. */
 function isMutatingCall(name: string, args: any): boolean {
-  if (['file_move', 'file_copy', 'file_write', 'file_edit', 'file_delete', 'file_mkdir', 'launch', 'mouse', 'type', 'keys'].includes(name)) return true;
+  if (['file_move', 'file_copy', 'file_write', 'file_edit', 'file_delete', 'file_mkdir', 'apply_patch', 'launch', 'mouse', 'type', 'keys'].includes(name)) return true;
   if (name === 'exec') return MUTATING_VERBS.has(execVerb(args?.cmd || ''));
   return false;
 }
@@ -337,6 +359,7 @@ function protectionViolation(name: string, args: any): string {
   if (name === 'file_move' || name === 'file_copy') paths.push(String(args?.src || ''), String(args?.dest || ''));
   if (name === 'file_delete') paths.push(String(args?.path || ''));
   if (name === 'file_write' || name === 'file_edit') paths.push(String(args?.path || ''));
+  if (name === 'apply_patch') paths.push(...(Array.isArray(args?.changes) ? args.changes : []).map((c: any) => String(c?.path || '')));
   if (name === 'exec') {
     const cmd = String(args?.cmd || '');
     if (/\b(move|del|erase|rmdir|rd|xcopy|robocopy|copy|move-item|remove-item|rename-item|new-item|set-content|out-file|remove-item)\b/i.test(cmd)) {
@@ -351,9 +374,39 @@ function protectionViolation(name: string, args: any): string {
   return '';
 }
 
+/** Target (path/perintah) yang dipakai aturan izin untuk mencocokkan pola. */
+function ruleTargetOf(name: string, args: any): string {
+  if (name === 'exec') return String(args?.cmd || '');
+  if (name === 'file_move' || name === 'file_copy') return `${args?.src || ''} -> ${args?.dest || ''}`;
+  if (name === 'apply_patch') return (Array.isArray(args?.changes) ? args.changes : []).map((c: any) => String(c?.path || '')).join(' | ');
+  if (['file_delete', 'file_write', 'file_edit', 'file_read', 'file_stat', 'file_mkdir'].includes(name)) return String(args?.path || args?.dir || '');
+  if (['file_list', 'file_glob', 'file_search'].includes(name)) return String(args?.dir || '');
+  return '';
+}
+
+function ruleMatches(rule: PermissionRule, name: string, target: string): boolean {
+  if (rule.tool !== '*' && rule.tool !== name) return false;
+  const pat = String(rule.pattern || '*').trim();
+  if (!pat || pat === '*') return true;
+  if (!target) return false;
+  const rx = new RegExp('^' + pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+  return rx.test(target) || rx.test(target.toLowerCase()) || target.toLowerCase().includes(pat.toLowerCase().replace(/\*/g, ''));
+}
+
+/** Urutan prioritas: deny > ask > allow. null = tidak ada aturan yang cocok. */
+function decideRule(rules: PermissionRule[], name: string, args: any): { action: RuleAction; rule: PermissionRule } | null {
+  const target = ruleTargetOf(name, args);
+  const matched = (rules || []).filter((r) => ruleMatches(r, name, target));
+  if (!matched.length) return null;
+  for (const action of ['deny', 'ask', 'allow'] as RuleAction[]) {
+    const r = matched.find((m) => m.action === action);
+    if (r) return { action, rule: r };
+  }
+  return null;
+}
+
 function toolSignature(name: string, args: any): string {
-  if (name === 'exec') return 'exec|' + canonExecCommand(args?.cmd || '');
-  const norm = (v: any): any => {
+  if (name === 'exec') return 'exec|' + canonExecCommand(args?.cmd || '');  const norm = (v: any): any => {
     if (Array.isArray(v)) return v.map(norm);
     if (v && typeof v === 'object') {
       const out: any = {};
@@ -550,6 +603,7 @@ const ICON: Record<string, string> = {
   file_read: '📖', file_write: '💾', file_list: '📂', file_glob: '🔎', file_search: '🔍',
   file_move: '📦', file_copy: '🧾', file_delete: '🗑', file_edit: '✏', file_mkdir: '📁', file_stat: '📄',
   todo_write: '📋', session_log: '🧾', ask_user: '❓',
+  web_search: '🔎', apply_patch: '🩹', spawn_subagents: '👥',
 };
 
 export default function App() {
@@ -566,7 +620,7 @@ export default function App() {
   const [browserOpen, setBrowserOpen] = useState<boolean>(() => {
     try { return localStorage.getItem(BROWSER_OPEN_KEY) !== '0'; } catch { return true; }
   });
-  const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate' | 'tokensaver'>(null);
+  const [panel, setPanel] = useState<null | 'settings' | 'memory' | 'skills' | 'donate' | 'tokensaver' | 'permissions'>(null);
   const [notice, setNotice] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [autoApprove, setAutoApprove] = useState(false);
@@ -576,6 +630,9 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuView, setMenuView] = useState<'root' | 'permission' | 'shell'>('root');
   const [modal, setModal] = useState<null | 'goal' | 'feedback'>(null);
+  const [ruleTool, setRuleTool] = useState('*');
+  const [rulePattern, setRulePattern] = useState('*');
+  const [ruleAction, setRuleAction] = useState<RuleAction>('deny');
   const [askState, setAskState] = useState<null | { question: string; options: string[] }>(null);
   const [askAnswer, setAskAnswer] = useState('');
   const askResolverRef = useRef<((v: string) => void) | null>(null);
@@ -649,6 +706,30 @@ export default function App() {
     setAskAnswer('');
     if (r) r(String(value || '').trim() || '(tidak dijawab)');
   }, []);
+
+  // ---- Aturan izin granular ----
+  const addRule = useCallback((tool: string, pattern: string, action: RuleAction) => {
+    const rule: PermissionRule = { id: uid(), tool: tool || '*', pattern: pattern || '*', action };
+    setSettings((s) => ({ ...s, rules: [...s.rules, rule].slice(0, 60) }));
+    flash(`Aturan izin ditambah: ${rule.tool} ${rule.pattern} → ${rule.action}`);
+  }, [flash]);
+
+  const removeRule = useCallback((id: string) => {
+    setSettings((s) => ({ ...s, rules: s.rules.filter((r) => r.id !== id) }));
+  }, []);
+
+  const presetRules = useCallback(() => {
+    const presets: PermissionRule[] = [
+      { id: uid(), tool: '*', pattern: 'C:\\Windows*', action: 'deny' },
+      { id: uid(), tool: '*', pattern: '*Program Files*', action: 'deny' },
+      { id: uid(), tool: '*', pattern: '*AppData*', action: 'deny' },
+      { id: uid(), tool: 'exec', pattern: '*format*', action: 'ask' },
+      { id: uid(), tool: 'file_move', pattern: 'D:\\*', action: 'allow' },
+      { id: uid(), tool: 'file_delete', pattern: '*', action: 'ask' },
+    ];
+    setSettings((s) => ({ ...s, rules: [...presets, ...s.rules].slice(0, 60) }));
+    flash('Preset aturan izin ditambahkan (sistem dilindungi, move ke D: diizinkan, delete bertanya).');
+  }, [flash]);
 
   // ---------------- model dropdown ----------------
   const loadModels = useCallback(async (silent = false) => {
@@ -1021,12 +1102,72 @@ export default function App() {
       });
   }, []);
 
+  // ---------------- sub-agent paralel ----------------
+  const SUBAGENT_TOOLS = new Set([
+    'file_list', 'file_glob', 'file_search', 'file_read', 'file_stat',
+    'browser_open', 'browser_action', 'browser_text', 'browser_snapshot',
+    'memory_search', 'skill_list', 'skill_read', 'web_search', 'session_log',
+  ]);
+
+  async function runSubagentsParallel(tasks: any[]): Promise<any> {
+    const list = (Array.isArray(tasks) ? tasks : []).slice(0, 4);
+    if (!list.length) return { error: 'tasks kosong' };
+    const tools = TOOLS.filter((t: any) => SUBAGENT_TOOLS.has(t.function.name));
+    const runOne = async (task: any, idx: number) => {
+      const prompt = String(task?.prompt || task?.title || '');
+      const title = String(task?.title || `Sub-agent ${idx + 1}`);
+      const sys =
+        `${agent.system}\n\n[SUB-AGENT] Kamu bekerja mandiri untuk satu tugas kecil. ` +
+        'Hanya MEMBACA (file_list/file_glob/file_search/file_read, browser, web_search). JANGAN mengubah file apa pun. ' +
+        'Selesaikan maksimal 10 langkah, lalu beri jawaban ringkas berisi temuan penting.';
+      const msgs: Msg[] = [{ role: 'user', content: prompt }];
+      const used: Record<string, number> = {};
+      let finalText = '';
+      let err = '';
+      for (let step = 0; step < 10; step++) {
+        if (abortRef.current) { err = 'dibatalkan pengguna'; break; }
+        const r = await window.dsh.chat({
+          provider: isAnthropic ? 'anthropic' : 'openai',
+          baseUrl: settings.baseUrl,
+          apiKey: settings.apiKey,
+          model: settings.model,
+          system: sys,
+          messages: messagesForApi(msgs),
+          tools: isAnthropic ? tools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters })) : tools,
+          tool_choice: isAnthropic ? undefined : 'auto',
+        });
+        if (r?.error) { err = JSON.stringify(r.error).slice(0, 300); break; }
+        const text = r.text || '';
+        const calls = (r.tool_calls || []).filter((tc: any) => SUBAGENT_TOOLS.has(tc.function?.name));
+        if (!calls.length) { finalText = text || '(tanpa jawaban)'; break; }
+        msgs.push({ role: 'assistant', content: text, tool_calls: calls });
+        for (const tc of calls) {
+          if (abortRef.current) break;
+          let a: any = {};
+          try { a = JSON.parse(tc.function.arguments || '{}'); } catch { a = {}; }
+          used[tc.function.name] = (used[tc.function.name] || 0) + 1;
+          let res: any;
+          if (tc.function.name === 'session_log') res = buildSessionLog(msgs);
+          else {
+            try { res = await runTool(tc.function.name, a); } catch (e: any) { res = { error: String(e?.message || e) }; }
+          }
+          msgs.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: JSON.stringify(res).slice(0, 3000) });
+        }
+      }
+      return { title, ok: !err, answer: finalText.slice(0, 1200), tools: used, steps: msgs.length, error: err || undefined };
+    };
+    const started = Date.now();
+    const results = await Promise.all(list.map((t, i) => runOne(t, i)));
+    return { ok: true, parallel: list.length, ms: Date.now() - started, subagents: results };
+  }
+
   async function agentLoop(sessionId: string, userText: string, agentDef: AgentDef, userContent?: any) {
     setRunning(true);
     setLiveStep(0);
     abortRef.current = false;
 
     let allowed = toolNamesFor(agentDef.tools);
+    setAgentRuntime({ webSearch: settings.webSearch });
     if (sessions.find((s) => s.id === sessionId)?.planMode) {
       const SAFE = ['file_list', 'file_glob', 'file_search', 'file_read', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read', 'session_log', 'ask_user'];
       allowed = allowed.filter((n) => SAFE.includes(n));
@@ -1209,14 +1350,28 @@ export default function App() {
             continue;
           }
 
+          // Aturan izin granular (deny > ask > allow), dicek sebelum aksi apa pun.
+          const decided = decideRule(settings.rules || [], name, args);
+          if (decided?.action === 'deny') {
+            pushToolResult({
+              error: 'diblokir aturan izin',
+              rule: { tool: decided.rule.tool, pattern: decided.rule.pattern, action: decided.rule.action },
+              hint: 'Aksi ini dilarang oleh aturan izin pengguna. Jangan mengulang. Pilih pendekatan lain atau jelaskan ke pengguna.',
+            });
+            continue;
+          }
+
           if (permission === 'read-only' && isDangerous(name, args)) {
             pushToolResult({ error: 'Mode Read Only aktif', hint: 'Aksi mengubah/menjalankan diblokir. Minta pengguna mengganti Permission ke Workspace Write atau Full access.' });
             continue;
           }
           const fullAccess = permission === 'full' || autoApprove;
-          if (isDangerous(name, args) && !fullAccess) {
+          const ruleAllows = decided?.action === 'allow';
+          const needAsk = !ruleAllows && (decided?.action === 'ask' || (isDangerous(name, args) && !fullAccess));
+          if (needAsk) {
+            const why = decided?.action === 'ask' ? `Aturan izin: ${decided.rule.tool} ${decided.rule.pattern} = tanya.` : '';
             const ok = await window.dsh.confirm(
-              `Izinkan aksi "${name}"?\n${JSON.stringify(args).slice(0, 300)}\n\n` +
+              `${why}\nIzinkan aksi "${name}"?\n${JSON.stringify(args).slice(0, 300)}\n\n` +
               `Klik Allow = izinkan semua aksi berikutnya di sesi ini (Full Access).`,
             );
             if (ok) {
@@ -1232,6 +1387,7 @@ export default function App() {
           let result: any;
           try {
             if (name === 'session_log') result = buildSessionLog(msgs);
+            else if (name === 'spawn_subagents') result = await runSubagentsParallel(args?.tasks);
             else if (name === 'ask_user') {
               const answer = await askUserInline(String(args?.question || 'OflaBot butuh konfirmasi'), args?.options);
               result = { ok: true, question: args?.question, answer };
@@ -1519,6 +1675,7 @@ export default function App() {
         <div className="side-actions">
           <button className="side-btn" onClick={() => { setPanel('memory'); void refreshMemory(); }}>🧠 Memory <span className="badge">{memCount}/{skillMemCount}</span></button>
           <button className="side-btn" onClick={() => { setPanel('skills'); void refreshSkills(); }}>🧩 Skills <span className="badge">{skillList.filter((s) => s.enabled).length}/{skillList.length}</span></button>
+          <button className="side-btn" onClick={() => setPanel('permissions')}>🛡 Izin <span className="badge">{settings.rules.length} aturan</span></button>
           <button className="side-btn" onClick={() => setPanel('tokensaver')}>⚡ Token Saver <span className="badge">{[settings.tokenSaver.rtk ? 'RTK' : '', settings.tokenSaver.caveman ? 'Caveman' : '', settings.tokenSaver.ponytail ? 'Ponytail' : ''].filter(Boolean).join('·') || 'off'}</span></button>
           <button className="side-btn" onClick={() => setPanel('settings')}>⚙ Settings</button>
           <button className="side-btn donate" onClick={() => setPanel('donate')}>❤ Dukung OflaBot</button>
@@ -1894,6 +2051,7 @@ export default function App() {
               <h3>
                 {panel === 'settings' && '⚙ Settings'}
                 {panel === 'tokensaver' && '⚡ Token Saver'}
+                {panel === 'permissions' && '🛡 Aturan Izin'}
                 {panel === 'memory' && '🧠 Memory & Skill Belajar'}
                 {panel === 'skills' && '🧩 Skills'}
                 {panel === 'donate' && '❤ Dukung OflaBot'}
@@ -1949,6 +2107,33 @@ export default function App() {
                     Full Access — jalankan aksi berbahaya tanpa konfirmasi
                   </label>
                   <div className="hint">Tanpa Full Access: dialog konfirmasi muncul sekali, lalu semua aksi berikutnya di sesi itu otomatis diizinkan (klik Allow).</div>
+
+                  <div className="settings-sep">Web Search (untuk tool web_search)</div>
+                  <label>Penyedia
+                    <select value={settings.webSearch.provider}
+                      onChange={(e) => setSettings((s) => ({ ...s, webSearch: { ...s.webSearch, provider: e.target.value } }))}>
+                      <option value="duckduckgo">DuckDuckGo (gratis, tanpa key)</option>
+                      <option value="bing">Bing (gratis, tanpa key)</option>
+                      <option value="tavily">Tavily (API key)</option>
+                      <option value="brave">Brave Search (API key)</option>
+                      <option value="searxng">SearXNG (baseUrl sendiri)</option>
+                    </select>
+                  </label>
+                  {(settings.webSearch.provider === 'tavily' || settings.webSearch.provider === 'brave') && (
+                    <label>API Key Web Search
+                      <input type="password" value={settings.webSearch.apiKey}
+                        onChange={(e) => setSettings((s) => ({ ...s, webSearch: { ...s.webSearch, apiKey: e.target.value } }))}
+                        placeholder="kunci API pencarian" />
+                    </label>
+                  )}
+                  {settings.webSearch.provider === 'searxng' && (
+                    <label>Base URL SearXNG
+                      <input value={settings.webSearch.baseUrl}
+                        onChange={(e) => setSettings((s) => ({ ...s, webSearch: { ...s.webSearch, baseUrl: e.target.value } }))}
+                        placeholder="https://searx.example.com" />
+                    </label>
+                  )}
+
                   <div className="hint">Versi {appVersion || '0.2.1'} · OflaBot</div>
                 </div>
               )}
@@ -2056,6 +2241,51 @@ export default function App() {
                       <div className="card-body">{s.description || '(tanpa deskripsi)'}</div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {panel === 'permissions' && (
+                <div className="form">
+                  <div className="hint">
+                    Aturan dicek sebelum tool dijalankan: <b>deny</b> memblokir, <b>ask</b> selalu bertanya,
+                    <b> allow</b> mengizinkan tanpa bertanya walau Full Access. Prioritas: deny &gt; ask &gt; allow.
+                    Pola mendukung <code>*</code>, mis. <code>C:\Windows*</code> atau <code>D:\*</code>.
+                    Tool <code>*</code> berarti semua tool. Untuk exec, pola dicocokkan ke perintahnya.
+                  </div>
+                  <div className="row-gap">
+                    <button className="btn" onClick={presetRules}>Tambahkan preset aman</button>
+                  </div>
+                  <div className="rule-add">
+                    <select value={ruleTool} onChange={(e) => setRuleTool(e.target.value)}>
+                      <option value="*">Semua tool (*)</option>
+                      <option value="file_delete">file_delete</option>
+                      <option value="file_move">file_move</option>
+                      <option value="file_copy">file_copy</option>
+                      <option value="file_write">file_write</option>
+                      <option value="file_edit">file_edit</option>
+                      <option value="apply_patch">apply_patch</option>
+                      <option value="exec">exec</option>
+                      <option value="launch">launch</option>
+                    </select>
+                    <input value={rulePattern} onChange={(e) => setRulePattern(e.target.value)} placeholder="pola: C:\Windows*  /  D:\*  /  *format*" />
+                    <select value={ruleAction} onChange={(e) => setRuleAction(e.target.value as RuleAction)}>
+                      <option value="deny">deny (blokir)</option>
+                      <option value="ask">ask (tanya)</option>
+                      <option value="allow">allow (izinkan)</option>
+                    </select>
+                    <button className="btn primary" onClick={() => addRule(ruleTool, rulePattern, ruleAction)}>Tambah</button>
+                  </div>
+                  <div className="rule-list">
+                    {settings.rules.length === 0 && <div className="hint">Belum ada aturan. Tool mengikuti Permission di toolbar (Read Only / Workspace / Full).</div>}
+                    {settings.rules.map((r) => (
+                      <div key={r.id} className={`rule-item ${r.action}`}>
+                        <span className="rule-tool mono">{r.tool}</span>
+                        <span className="rule-pattern mono" title={r.pattern}>{r.pattern}</span>
+                        <span className={`rule-action ${r.action}`}>{r.action}</span>
+                        <button className="btn icon" title="Hapus aturan" onClick={() => removeRule(r.id)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

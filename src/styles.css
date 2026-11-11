@@ -440,3 +440,16 @@ pre.mono { margin: 0; white-space: pre-wrap; }
 .ask-options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .ask-input { width: 100%; background: #0b0d12; border: 1px solid #2a3040; border-radius: 8px; color: #e7e9ee; padding: 9px 11px; font-size: 13px; margin-bottom: 12px; }
 .ask-input:focus { outline: none; border-color: #2b5cff; }
+
+/* ===== izin granular ===== */
+.settings-sep { font-size: 11.5px; font-weight: 600; color: #9db4ff; margin: 14px 0 2px; border-top: 1px solid #1e2330; padding-top: 12px; }
+.rule-add { display: grid; grid-template-columns: 150px 1fr 130px auto; gap: 8px; align-items: center; margin: 10px 0; }
+.rule-add select, .rule-add input { background: #0b0d12; border: 1px solid #2a3040; border-radius: 8px; color: #e7e9ee; padding: 7px 9px; font-size: 12.5px; }
+.rule-list { display: flex; flex-direction: column; gap: 6px; }
+.rule-item { display: flex; align-items: center; gap: 8px; background: #0d1119; border: 1px solid #1e2330; border-radius: 8px; padding: 6px 9px; font-size: 12px; }
+.rule-tool { min-width: 100px; color: #9db4ff; }
+.rule-pattern { flex: 1; color: #c3c9d6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-action { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
+.rule-action.deny { background: #2a1214; color: #ff8a8a; border: 1px solid #4a1a1f; }
+.rule-action.ask { background: #2a2010; color: #ffca70; border: 1px solid #4a3a12; }
+.rule-action.allow { background: #10201a; color: #7fe0a8; border: 1px solid #1d3b2c; }

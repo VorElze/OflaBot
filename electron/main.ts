@@ -378,6 +378,37 @@ app.whenReady().then(() => {
           } catch (e: any) { console.log('FS_FAIL ' + (e?.message || String(e))); }
         }
 
+        // Uji patch multi-file + web search (OFLABOT_SMOKE_TOOLS2=1).
+        if (process.env.OFLABOT_SMOKE_TOOLS2) {
+          try {
+            const r = await win!.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              const dir = 'D:/DeepSeek/aplikasi/.tools/patchtest';
+              await window.dsh.fs.mkdir(dir);
+              const okPatch = await window.dsh.fs.patch([
+                { op: 'write', path: dir + '/a.txt', content: 'satu\\ndua\\n' },
+                { op: 'write', path: dir + '/b.txt', content: 'tiga\\n' },
+                { op: 'edit', path: dir + '/b.txt', oldText: 'tiga', newText: 'tiga empat' },
+              ]);
+              out.okPatch = { ok: okPatch.ok, applied: okPatch.applied, hasBackup: !!okPatch.backupDir };
+              out.a = await window.dsh.fs.read(dir + '/a.txt');
+              out.b = await window.dsh.fs.read(dir + '/b.txt');
+              const bad = await window.dsh.fs.patch([
+                { op: 'write', path: dir + '/a.txt', content: 'DIUBAH-SEBELUM-GAGAL' },
+                { op: 'edit', path: dir + '/b.txt', oldText: 'TEKS-YANG-TIDAK-ADA', newText: 'x' },
+              ]);
+              out.badPatch = { error: !!bad.error, rolledBack: bad.rolledBack || [] };
+              out.aAfterBad = await window.dsh.fs.read(dir + '/a.txt');
+              await window.dsh.fs.delete(dir, { recursive: true });
+              out.web = await window.dsh.web.search({ provider: 'bing' }, 'OpenAI', 5);
+              out.webFallback = await window.dsh.web.search({ provider: 'duckduckgo' }, 'OpenAI', 5);
+              out.webSummary = { ok: !!out.web.ok, provider: out.web.provider, count: out.web.count, first: (out.web.results || [])[0], fallbackOk: !!out.webFallback.ok, fallbackProvider: out.webFallback.provider };
+              return out;
+            })()`);
+            console.log('TOOLS2_TEST ' + JSON.stringify(r));
+          } catch (e: any) { console.log('TOOLS2_FAIL ' + (e?.message || String(e))); }
+        }
+
         // Uji Ctrl+V gambar: taruh PNG di clipboard OS, paste lewat webContents.paste().
         if (process.env.OFLABOT_SMOKE_PASTE) {
           try {
@@ -421,7 +452,7 @@ app.whenReady().then(() => {
               ]
             : [];
           await win!.webContents.executeJavaScript(`(() => {
-            const settings = { provider: 'custom', baseUrl: 'http://127.0.0.1:18999', apiKey: 'mock', model: ${JSON.stringify(modelName)}, autoLearn: false, accessMode: 'full', permission: 'full', tokenSaver: { rtk: true, caveman: false, ponytail: false } };
+            const settings = { provider: 'custom', baseUrl: 'http://127.0.0.1:18999', apiKey: 'mock', model: ${JSON.stringify(modelName)}, autoLearn: false, accessMode: 'full', permission: 'full', tokenSaver: { rtk: true, caveman: false, ponytail: false }, rules: ${JSON.stringify(modelName.includes('rule') ? [{ id: 'r1', tool: 'file_delete', pattern: '*penting*', action: 'deny' }] : [])}, webSearch: { provider: 'duckduckgo', apiKey: '', baseUrl: '' } };
             localStorage.setItem('oflabot.settings.v1', JSON.stringify(settings));
             localStorage.setItem('oflabot.sessions.v1', JSON.stringify([{ id: 'engine-test', title: 'engine test', agentId: 'oflabot', messages: ${JSON.stringify(seedMsgs)}, createdAt: Date.now(), updatedAt: Date.now() }]));
             localStorage.setItem('oflabot.active-session.v1', 'engine-test');
@@ -1156,6 +1187,237 @@ ipcMain.handle('file:write', async (_e, file: string, content: string) => {
     const st = await statSafe(file);
     return { ok: true, path: file, size: st?.size ?? 0 };
   } catch (e: any) { return { error: e2(e), code: e?.code }; }
+});
+
+// ===========================================================================
+// Web search (tanpa backend): DuckDuckGo HTML (gratis), Tavily, Brave, SearXNG.
+// ===========================================================================
+function stripHtml(s: string): string {
+  return String(s || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+async function searchDuckDuckGo(query: string, count: number): Promise<any> {
+  const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
+  const res = await net.fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+      'accept-language': 'id-ID,id;q=0.9,en;q=0.8',
+    },
+  });
+  const html = await res.text();
+  const results: any[] = [];
+  const re = /<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  const snippets = Array.from(html.matchAll(/<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)).map((x) => stripHtml(x[1]));
+  while ((m = re.exec(html)) && results.length < count) {
+    let link = m[1];
+    try {
+      const u = new URL(link, 'https://duckduckgo.com');
+      if (u.searchParams.get('uddg')) link = decodeURIComponent(u.searchParams.get('uddg') as string);
+    } catch { /* biarkan */ }
+    results.push({ title: stripHtml(m[2]), url: link, snippet: snippets[results.length] || '' });
+  }
+  return { ok: true, provider: 'duckduckgo', results, count: results.length };
+}
+
+function decodeBingUrl(u: string): string {
+  try {
+    const clean = String(u).replace(/&amp;/g, '&');
+    const url = new URL(clean);
+    const p = url.searchParams.get('u');
+    if (p && p.startsWith('a1')) {
+      const b64 = p.slice(2).replace(/-/g, '+').replace(/_/g, '/');
+      const dec = Buffer.from(b64, 'base64').toString('utf8');
+      if (/^https?:\/\//.test(dec)) return dec;
+    }
+    return clean;
+  } catch { return String(u).replace(/&amp;/g, '&'); }
+}
+
+async function searchBing(query: string, count: number): Promise<any> {
+  const url = 'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=id&cc=ID';
+  const res = await net.fetch(url, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+      'accept-language': 'id-ID,id;q=0.9,en;q=0.8',
+    },
+  });
+  if (!res.ok) return { error: `Bing HTTP ${res.status}` };
+  const html = await res.text();
+  const blocks = html.split('<li class="b_algo"').slice(1);
+  const results: any[] = [];
+  for (const block of blocks) {
+    if (results.length >= count) break;
+    const chunk = block.split('<li class="b_algo"')[0];
+    const link = chunk.match(/<h2[^>]*>[\s\S]*?<a[^>]+href="(https?:\/\/[^"]+)"/i);
+    const title = chunk.match(/<h2[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
+    if (!link) continue;
+    const snip = chunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    results.push({
+      title: stripHtml(title?.[1] || link[1]),
+      url: decodeBingUrl(link[1]),
+      snippet: stripHtml(snip?.[1] || '').slice(0, 300),
+    });
+  }
+  return { ok: results.length > 0, provider: 'bing', results, count: results.length };
+}
+
+async function searchTavily(cfg: any, query: string, count: number): Promise<any> {
+  const res = await net.fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ api_key: cfg.apiKey, query, max_results: count, search_depth: 'basic' }),
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: `Tavily HTTP ${res.status}: ${JSON.stringify(data).slice(0, 200)}` };
+  return { ok: true, provider: 'tavily', results: (data.results || []).map((r: any) => ({ title: r.title, url: r.url, snippet: String(r.content || '').slice(0, 300) })) };
+}
+
+async function searchBrave(cfg: any, query: string, count: number): Promise<any> {
+  const url = 'https://api.search.brave.com/res/v1/web/search?q=' + encodeURIComponent(query) + '&count=' + count;
+  const res = await net.fetch(url, { headers: { 'accept': 'application/json', 'x-subscription-token': cfg.apiKey || '' } });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: `Brave HTTP ${res.status}: ${JSON.stringify(data).slice(0, 200)}` };
+  return { ok: true, provider: 'brave', results: (data.web?.results || []).map((r: any) => ({ title: r.title, url: r.url, snippet: stripHtml(r.description || '') })) };
+}
+
+async function searchSearxng(cfg: any, query: string, count: number): Promise<any> {
+  const base = String(cfg.baseUrl || '').replace(/\/+$/, '');
+  if (!base) return { error: 'baseUrl SearXNG belum diisi' };
+  const url = `${base}/search?q=${encodeURIComponent(query)}&format=json&language=id`;
+  const res = await net.fetch(url, { headers: { accept: 'application/json' } });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: `SearXNG HTTP ${res.status}: ${JSON.stringify(data).slice(0, 200)}` };
+  return { ok: true, provider: 'searxng', results: (data.results || []).slice(0, count).map((r: any) => ({ title: r.title, url: r.url, snippet: String(r.content || '').slice(0, 300) })) };
+}
+
+ipcMain.handle('web:search', async (_e, cfg: any, query: string, count = 8) => {
+  try {
+    const q = String(query || '').trim();
+    if (!q) return { error: 'query kosong' };
+    const n = Math.min(Math.max(Number(count) || 8, 1), 20);
+    const provider = String(cfg?.provider || 'duckduckgo').toLowerCase();
+    if (provider === 'tavily') return await searchTavily(cfg, q, n);
+    if (provider === 'brave') return await searchBrave(cfg, q, n);
+    if (provider === 'bing') return await searchBing(q, n);
+    if (provider === 'searxng') return await searchSearxng({ ...cfg, baseUrl: cfg?.baseUrl || 'https://searx.be' }, q, n);
+    // DuckDuckGo (gratis). Banyak jaringan memblokir TLS-nya -> fallback Bing / SearXNG.
+    const ddg = await searchDuckDuckGo(q, n).catch((e: any) => ({ error: String(e?.message || e) }));
+    if (ddg?.ok && (ddg.results || []).length) return ddg;
+    const bing = await searchBing(q, n).catch((e: any) => ({ error: String(e?.message || e) }));
+    if (bing?.ok && (bing.results || []).length) {
+      return { ...bing, provider: 'bing (fallback)', note: 'DuckDuckGo tidak bisa diakses dari jaringan ini; memakai Bing.' };
+    }
+    const fb = await searchSearxng({ baseUrl: 'https://searx.be' }, q, n).catch((e: any) => ({ error: String(e?.message || e) }));
+    if (fb?.ok && (fb.results || []).length) {
+      return { ...fb, provider: 'searxng (fallback)', note: 'Memakai SearXNG publik.' };
+    }
+    return { error: 'Pencarian gagal. ' + [ddg?.error, bing?.error, fb?.error].filter(Boolean).join(' | ') };
+  } catch (e: any) {
+    return { error: 'web search gagal: ' + (e?.message || String(e)) };
+  }
+});
+
+// ===========================================================================
+// Patch multi-file: validasi -> backup -> terapkan -> rollback saat gagal.
+// ===========================================================================
+ipcMain.handle('fs:patch', async (_e, changes: any[]) => {
+  const list = Array.isArray(changes) ? changes : [];
+  if (!list.length) return { error: 'changes kosong' };
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = path.join(app.getPath('userData'), 'patch-backups', stamp);
+  const backups: { path: string; backup?: string; existed: boolean }[] = [];
+  const applied: string[] = [];
+  try {
+    // 1) validasi seluruh perubahan dulu (fail fast, belum tulis apa pun).
+    //    "virtual" menyimpan bayangan isi file agar beberapa perubahan ke file
+    //    yang sama / baru dibuat di patch ini ikut tervalidasi.
+    const virtual = new Map<string, string | null>();
+    for (const c of list) {
+      const op = String(c?.op || 'edit').toLowerCase();
+      const target = path.resolve(String(c?.path || ''));
+      if (!target) return { error: 'path kosong pada salah satu perubahan' };
+      if (op === 'edit' && (typeof c?.oldText !== 'string' || !c.oldText)) return { error: `oldText kosong untuk ${target}` };
+      if (op === 'write' && typeof c?.content !== 'string') return { error: `content kosong untuk ${target}` };
+      const readCurrent = async (): Promise<string | null> => {
+        if (virtual.has(target)) return virtual.get(target) as string | null;
+        return await fsProm.readFile(lp(target), 'utf8').catch(() => null);
+      };
+      const cur = await readCurrent();
+      if (op === 'edit') {
+        if (cur === null) return { error: `file tidak ditemukan: ${target}` };
+        if (!cur.includes(c.oldText)) return { error: `teks tidak ditemukan di ${target}`, hint: 'baca ulang file lalu sesuaikan oldText' };
+        virtual.set(target, String(c.replaceAll ? cur.split(c.oldText).join(String(c.newText ?? '')) : cur.replace(c.oldText, String(c.newText ?? ''))));
+      } else if (op === 'write') {
+        virtual.set(target, String(c.content));
+      } else if (op === 'delete') {
+        if (cur === null && !c.recursive) return { error: `file tidak ditemukan: ${target}` };
+        virtual.set(target, null);
+      }
+    }
+    // 2) backup semua file yang akan diubah/dihapus
+    await fsProm.mkdir(lp(backupDir), { recursive: true });
+    const manifest: any[] = [];
+    for (const c of list) {
+      const op = String(c?.op || 'edit').toLowerCase();
+      if (op === 'mkdir') continue;
+      const target = path.resolve(String(c?.path || ''));
+      const st = await statSafe(target);
+      const entry: any = { op, path: target, existed: !!st };
+      if (st && st.isFile()) {
+        const safe = target.replace(/[:\\/]+/g, '_');
+        const dest = path.join(backupDir, safe);
+        await fsProm.copyFile(lp(target), lp(dest));
+        entry.backup = dest;
+      }
+      manifest.push(entry);
+      backups.push(entry);
+    }
+    await fsProm.writeFile(path.join(backupDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8').catch(() => {});
+    // 3) terapkan
+    for (const c of list) {
+      const op = String(c?.op || 'edit').toLowerCase();
+      const target = path.resolve(String(c?.path || ''));
+      if (op === 'mkdir') {
+        await fsProm.mkdir(lp(target), { recursive: true });
+        applied.push(target);
+        continue;
+      }
+      if (op === 'write') {
+        await fsProm.mkdir(lp(path.dirname(target)), { recursive: true });
+        await fsProm.writeFile(lp(target), String(c.content), 'utf8');
+        applied.push(target);
+        continue;
+      }
+      if (op === 'delete') {
+        await fsProm.rm(lp(target), { recursive: !!c.recursive, force: true });
+        applied.push(target);
+        continue;
+      }
+      const cur = await fsProm.readFile(lp(target), 'utf8');
+      const count = cur.split(c.oldText).length - 1;
+      const next = c.replaceAll ? cur.split(c.oldText).join(String(c.newText ?? '')) : cur.replace(c.oldText, String(c.newText ?? ''));
+      await fsProm.writeFile(lp(target), next, 'utf8');
+      applied.push(target);
+      void count;
+    }
+    return { ok: true, applied: applied.length, files: applied, backupDir, note: 'Backup tersedia; gunakan untuk rollback manual jika perlu.' };
+  } catch (err: any) {
+    // 4) rollback yang sudah terlanjur diterapkan
+    const rolledBack: string[] = [];
+    for (const b of backups.slice().reverse()) {
+      try {
+        if (!b.existed) await fsProm.rm(lp(b.path), { force: true, recursive: true });
+        else if (b.backup) await fsProm.copyFile(lp(b.backup), lp(b.path));
+        rolledBack.push(b.path);
+      } catch { /* lanjut */ }
+    }
+    return { error: 'patch gagal: ' + e2(err), code: err?.code, rolledBack, backupDir };
+  }
 });
 
 // ---- Launch app / URL ----

@@ -1,6 +1,6 @@
 {
   "name": "oflabot-desktop",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "OflaBot - AI desktop agent (browser tertanam, memory & auto-skill)",
   "author": "OflaBot",
   "main": "dist-electron/main.js",

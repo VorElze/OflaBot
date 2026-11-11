@@ -26,8 +26,11 @@ const WORK_RULES =
   '8) JANGAN memindahkan/menghapus file sistem: C:\\Windows, C:\\Program Files, C:\\ProgramData, AppData, Recovery, System Volume Information — itu bisa merusak Windows. ' +
   'Jika pengguna memintanya, jelaskan risikonya dan minta konfirmasi eksplisit lebih dulu. ' +
   '9) Jika bingung/ambigu atau butuh keputusan pengguna (mis. file mana yang dimaksud), panggil ask_user dan tunggu jawabannya — JANGAN menebak berulang-ulang. ' +
-  '10) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
-  '11) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
+  '10) Untuk berita/informasi terbaru pakai web_search (lalu browser_open+browser_text bila perlu). ' +
+  'Untuk mengubah beberapa file sekaligus pakai apply_patch (validasi+backup otomatis). ' +
+  'Untuk riset yang bisa dipecah, pakai spawn_subagents (maks 4, sub-agent hanya membaca). ' +
+  '11) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
+  '12) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
 
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +
@@ -111,6 +114,7 @@ const desktopTools = [
   'screenshot', 'exec', 'launch', 'mouse', 'type', 'keys',
   'file_read', 'file_write', 'file_edit', 'file_list', 'file_glob', 'file_search',
   'file_move', 'file_copy', 'file_delete', 'file_mkdir', 'file_stat', 'todo_write', 'ask_user',
+  'web_search', 'apply_patch', 'spawn_subagents',
 ];
 const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write'];
 

@@ -294,6 +294,20 @@ terus tanpa pernah mengubah apa pun. Perbaikan:
 - **Aturan prompt baru**: dilarang `exec dir` untuk daftar file, dilarang `Get-ChildItem -Recurse C:\`,
   wajib pakai `file_list` + `file_move` per folder.
 
+## 🔐 Izin granular, Web Search, Patch, Sub-agent (v0.3.0)
+
+- **Aturan izin granular** (menu sidebar **🛡 Izin**): atur `deny` / `ask` / `allow` per tool dan pola
+  path/perintah. Contoh: `*` + `C:\Windows*` = deny, `file_move` + `D:\*` = allow,
+  `exec` + `*format*` = ask. Prioritas deny &gt; ask &gt; allow. Ada tombol **preset aman**
+  (folder sistem diblokir, move ke D: diizinkan, delete bertanya) dan daftar aturan bisa dihapus.
+- **Web search** (`web_search`): cari berita/informasi terbaru. Penyedia: DuckDuckGo (gratis),
+  **Bing (gratis)**, Tavily, Brave, SearXNG — diatur di Settings. Jika DuckDuckGo diblokir jaringan,
+  otomatis fallback ke Bing. URL hasil sudah didekode (bukan link redirect).
+- **Patch multi-file** (`apply_patch`): ubah banyak file sekaligus — validasi dulu, **backup otomatis**
+  ke `userdata/patch-backups`, lalu terapkan; jika gagal → rollback. Mendukung `edit`/`write`/`delete`/`mkdir`.
+- **Sub-agent paralel** (`spawn_subagents`): pecah riset/pembacaan jadi maksimal 4 sub-agent yang jalan
+  bersamaan, masing-masing konteks sendiri dan **hanya boleh membaca**; hasilnya digabung jadi satu kartu.
+
 ## Tempel screenshot
 
 Tekan **Ctrl+V** di kotak pesan untuk melampirkan screenshot dari clipboard

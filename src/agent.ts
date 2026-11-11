@@ -266,6 +266,76 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'web_search',
+      description:
+        'Cari informasi terbaru di web (hasil: judul, URL, cuplikan). Pakai untuk berita/harga/fakta terkini. ' +
+        'Untuk membaca isi halaman, buka URL tersebut dengan browser_open lalu browser_text.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' }, count: { type: 'number' } },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'apply_patch',
+      description:
+        'Ubah BEBERAPA file sekaligus secara aman (validasi dulu, backup otomatis, rollback jika gagal). ' +
+        'changes: [{op:"edit"|"write"|"delete"|"mkdir", path, oldText?, newText?, content?, replaceAll?, recursive?}]. ' +
+        'Gunakan op="edit" untuk perubahan kecil (oldText harus persis), op="write" untuk file baru.',
+      parameters: {
+        type: 'object',
+        properties: {
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                op: { type: 'string', enum: ['edit', 'write', 'delete', 'mkdir'] },
+                path: { type: 'string' },
+                oldText: { type: 'string' },
+                newText: { type: 'string' },
+                content: { type: 'string' },
+                replaceAll: { type: 'boolean' },
+                recursive: { type: 'boolean' },
+              },
+              required: ['op', 'path'],
+            },
+          },
+        },
+        required: ['changes'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_subagents',
+      description:
+        'Jalankan beberapa sub-agent PARALEL untuk tugas riset/pembacaan yang independen (hemat waktu). ' +
+        'Setiap sub-agent punya konteks sendiri dan hanya boleh MEMBACA (file_list/glob/search/read, browser, web_search). ' +
+        'Maksimal 4 tugas. Kembalikan ringkasan tiap sub-agent.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tasks: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { title: { type: 'string' }, prompt: { type: 'string' } },
+              required: ['prompt'],
+            },
+          },
+        },
+        required: ['tasks'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'ask_user',
       description: 'Tanya pengguna dan TUNGGU jawabannya (gaya ask_user_question). Pakai saat bingung/ ambigu/ butuh izin, JANGAN mengulang tool terus. options: pilihan jawaban cepat (opsional).',
       parameters: {
@@ -357,6 +427,12 @@ export const BROWSER_TOOL_NAMES = [
 
 export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write', 'file_list', 'file_stat'];
 
+/** Konfigurasi runtime dari App (web search, dll) — diisi sebelum agent loop. */
+let RUNTIME: any = {};
+export function setAgentRuntime(cfg: any) {
+  RUNTIME = { ...RUNTIME, ...(cfg || {}) };
+}
+
 export async function runTool(name: string, args: any): Promise<any> {
   const b = window.dsh.browser;
   const mem = window.dsh.memory;
@@ -411,6 +487,9 @@ export async function runTool(name: string, args: any): Promise<any> {
     case 'type': return window.dsh.type(args.text);
     case 'keys': return window.dsh.keys(args.keys);
     case 'file_write': return window.dsh.fileWrite(args.path, args.content);
+    case 'apply_patch': return window.dsh.fs.patch(Array.isArray(args.changes) ? args.changes : []);
+    case 'web_search': return window.dsh.web.search(RUNTIME.webSearch || {}, String(args.query || ''), args.count);
+    case 'spawn_subagents': return { error: 'spawn_subagents ditangani di renderer' };
     case 'ask_user': return { error: 'ask_user ditangani di renderer' };
     case 'confirm': return window.dsh.confirm(args.message);
     case 'confirm_dangerous': return window.dsh.confirm(args.message);
@@ -422,7 +501,7 @@ export async function runTool(name: string, args: any): Promise<any> {
 export function isDangerous(name: string, _args: any): boolean {
   if (BROWSER_TOOL_NAMES.includes(name)) return false;
   if (MEMORY_TOOL_NAMES.includes(name)) return false;
-  if (['screenshot', 'file_read', 'file_list', 'file_glob', 'file_search', 'file_stat', 'session_log', 'ask_user', 'confirm', 'confirm_dangerous'].includes(name)) return false;
+  if (['screenshot', 'file_read', 'file_list', 'file_glob', 'file_search', 'file_stat', 'session_log', 'ask_user', 'confirm', 'confirm_dangerous', 'web_search', 'spawn_subagents'].includes(name)) return false;
   return true;
 }
 
