@@ -17,6 +17,18 @@
 
 ---
 
+## ⬇️ Download
+
+Rilis siap pakai (installer Windows):
+**[github.com/VorElze/OflaBot/releases](https://github.com/VorElze/OflaBot/releases/latest)**
+
+1. Unduh `OflaBot-Setup-<versi>.exe`
+2. Jalankan installer — jika muncul **"Windows protected your PC"**, klik
+   **More info → Run anyway** (aplikasi belum code-signing).
+3. Shortcut **OflaBot** dibuat di Desktop & Start Menu.
+
+Verifikasi unduhan dengan file `.sha256` yang disertakan di halaman rilis.
+
 ## ✨ Fitur
 
 | Fitur | Keterangan |
