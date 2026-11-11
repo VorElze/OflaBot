@@ -18,8 +18,11 @@ const WORK_RULES =
   '2) Operasi file WAJIB pakai tool native: file_list (daftar/pola), file_stat (baca), file_move (pindah/copy, otomatis buat folder), file_mkdir. ' +
   'JANGAN pakai shell "dir", "move", "copy", "mkdir" berulang-ulang — itu penyebab loop. ' +
   '3) exec hanya untuk hal yang tidak ada tool-nya; beri timeoutMs dan cwd bila perlu, dan pecah perintah besar menjadi langkah kecil. ' +
-  '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 2×. Kalau gagal, ubah pendekatan atau tanya pengguna. ' +
-  '5) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
+  '4) Jangan pernah memanggil tool yang sama dengan argumen sama lebih dari 1×; hasilnya sudah ada di konteks. ' +
+  '5) HEMAT LANGKAH: maksimal 5 panggilan baca (file_list/file_stat/browser_text/dll) sebelum kamu WAJIB mengambil aksi nyata. ' +
+  'Jangan menjelajahi folder yang tidak berhubungan dengan tugas. Untuk tugas memindahkan file: daftar 1-2 folder sumber, lalu LANGSUNG file_move. ' +
+  '6) Jika pengguna minta laporan/progres/"kenapa error", panggil session_log dan rangkum dari situ — jangan membaca folder lain. ' +
+  '7) Akhiri dengan jawaban ringkas: apa yang dikerjakan, hasil, dan kendala (jika ada) — dalam bahasa awam, tanpa istilah teknis.';
 
 const MEMORY_RULES =
   'ATURAN MEMORY & SKILL: ' +
@@ -100,7 +103,7 @@ export function getAgent(id: string): AgentDef {
 
 const browserTools = ['browser_open', 'browser_action', 'browser_snapshot', 'browser_text', 'browser_click', 'browser_fill'];
 const desktopTools = ['screenshot', 'exec', 'launch', 'mouse', 'type', 'keys', 'file_read', 'file_write', 'file_list', 'file_move', 'file_mkdir', 'file_stat', 'todo_write'];
-const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'todo_write'];
+const memoryTools = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write'];
 
 // Tool yang tersedia per tipe agent (memory selalu tersedia).
 export function toolNamesFor(kind: AgentDef['tools']): string[] {

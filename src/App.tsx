@@ -147,41 +147,49 @@ function pretty(v: any, max = 900): string {
  * Ringkas hasil tool untuk dikirim ke model: buang key besar, batasi list & panjang.
  * UI tetap menampilkan versi penuh.
  */
-function compressToolResult(name: string, result: any, full: string): string {
-  const MAX = 1200;
+function compressToolResult(name: string, result: any, full: string, aggressive = true): string {
+  const MAX = aggressive ? 1200 : 4000;
   try {
     if (!result || typeof result !== 'object') return String(full).slice(0, MAX);
 
-    // Daftar file/folder: ringkas jadi hitungan + sampel
+    // Daftar file/folder: SELALU diringkas (nama saja + hitungan). Path lengkap
+    // diulang-ulang bikin konteks model cepat penuh.
     if (Array.isArray(result.entries)) {
       const entries = result.entries as any[];
-      const sample = entries.slice(0, 8).map((e) => (e.dir ? '[dir] ' : '') + (e.name || e.path));
+      const take = aggressive ? 8 : 30;
+      const sample = entries.slice(0, take).map((e) => (e.dir ? '[dir] ' : '') + (e.name || e.path));
       return JSON.stringify({
         ok: result.ok, base: result.base, count: result.count, truncated: result.truncated,
-        sample, note: entries.length > sample.length ? `${entries.length - sample.length} entri lain disembunyikan (token saver)` : undefined,
+        sample, note: entries.length > sample.length ? `${entries.length - sample.length} entri lain disembunyikan (gaya DSH: pakai pola/pattern untuk mempersempit)` : undefined,
       }).slice(0, MAX);
     }
 
     // exec: kode + potongan output
     if ('stdout' in result || 'stderr' in result) {
+      const lim = aggressive ? 600 : 1500;
       return JSON.stringify({
         code: result.code, timedOut: result.timedOut, truncated: result.truncated,
-        stdout: String(result.stdout || '').slice(0, 600),
-        stderr: String(result.stderr || '').slice(0, 400),
+        stdout: String(result.stdout || '').slice(0, lim),
+        stderr: String(result.stderr || '').slice(0, aggressive ? 400 : 800),
       }).slice(0, MAX);
     }
 
     // browser_text / teks panjang
     if (typeof result.text === 'string' && result.text.length > 500) {
-      return JSON.stringify({ ...result, text: result.text.slice(0, 700) + '…(dipotong token saver)' }).slice(0, MAX);
+      return JSON.stringify({ ...result, text: result.text.slice(0, aggressive ? 700 : 1800) + '…(dipotong; pakai bagian penting saja)' }).slice(0, MAX);
     }
 
     // gambar tidak perlu base64 di teks
-    if (result.dataUrl) return JSON.stringify({ ...result, dataUrl: '(gambar)' }).slice(0, MAX);
+    if (result.dataUrl) return JSON.stringify({ ...result, dataUrl: '(gambar terkirim terpisah)' }).slice(0, MAX);
 
-    // generik: minify + batasi
+    // generik: minify + batasi. Potong TENGAH (head+tail) seperti pruner DSH,
+    // supaya awal & akhir output tetap terlihat model.
     const minified = JSON.stringify(result).replace(/\s{2,}/g, ' ');
-    return minified.length > MAX ? minified.slice(0, MAX) + '…(dipotong token saver)' : minified;
+    if (minified.length <= MAX) return minified;
+    const head = Math.max(200, MAX - 500);
+    const tail = 400;
+    const omitted = minified.length - head - tail;
+    return minified.slice(0, head) + `\n\n[... ${omitted} karakter tengah dipotong ...]\n\n` + minified.slice(-tail);
   } catch {
     return String(full).slice(0, MAX);
   }
@@ -208,7 +216,15 @@ function buildBlocks(messages: Msg[]): Block[] {
         const denied = !!(res && typeof res === 'object' && String(res.error || '').includes('dibatalkan'));
         items.push({ name: tc.function?.name, args: safeJson(tc.function?.arguments) ?? tc.function?.arguments, result: res, image: resMsg?.image, denied });
       }
-      blocks.push({ kind: 'activity', items, text: typeof m.content === 'string' && m.content.trim() && m.content !== '(memanggil tool)' ? m.content : undefined });
+      const note = typeof m.content === 'string' && m.content.trim() && m.content !== '(memanggil tool)' ? m.content : undefined;
+      const prev = blocks[blocks.length - 1];
+      // Gabungkan pemanggilan tool berurutan jadi SATU kartu supaya kolom chat
+      // tidak penuh baris "Used file_list" (gaya DSH/OpenCode).
+      if (prev && prev.kind === 'activity' && !prev.text && !note) {
+        prev.items.push(...items);
+      } else {
+        blocks.push({ kind: 'activity', items, text: note });
+      }
       i++;
       continue;
     }
@@ -220,12 +236,189 @@ function buildBlocks(messages: Msg[]): Block[] {
   return blocks;
 }
 
+/** Peta tool -> kategori (mengikuti pola DSH: judul grup memakai kategori, bukan nama tool). */
+function toolCategory(name: string): { key: string; label: string } {
+  const n = name || '';
+  if (n === 'file_list' || n === 'file_stat' || n === 'file_read') return { key: 'read', label: 'Membaca file' };
+  if (n === 'exec' || n === 'launch') return { key: 'commands', label: 'Menjalankan perintah' };
+  if (n === 'file_move' || n === 'file_write' || n === 'file_mkdir') return { key: 'write', label: 'Mengubah file' };
+  if (n.startsWith('browser_')) return { key: 'web', label: 'Menjelajah web' };
+  if (n.startsWith('memory_') || n.startsWith('skill_')) return { key: 'memory', label: 'Mengingat hal penting' };
+  if (n === 'todo_write' || n === 'session_log') return { key: 'plan', label: 'Menyusun rencana' };
+  if (n === 'screenshot' || n === 'mouse' || n === 'type' || n === 'keys') return { key: 'desktop', label: 'Mengoperasikan layar' };
+  return { key: 'tools', label: 'Memakai tool' };
+}
+
 function activitySummary(items: ActivityItem[]): string {
-  const names = Array.from(new Set(items.map((it) => it.name || 'tool')));
-  const denied = items.filter((it) => it.denied).length;
-  const label = names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : '');
-  const base = items.length === 1 ? `Used ${label}` : `Used ${items.length} tools · ${label}`;
-  return denied ? `${base} · ${denied} dibatalkan` : base;
+  const counts = new Map<string, number>();
+  const labelOf = new Map<string, string>();
+  for (const it of items) {
+    const cat = toolCategory(it.name || 'tool');
+    counts.set(cat.key, (counts.get(cat.key) || 0) + 1);
+    labelOf.set(cat.key, cat.label);
+  }
+  const ranked = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const labels = ranked.map(([k]) => labelOf.get(k) || 'Memakai tool');
+  let title: string;
+  if (labels.length === 0) title = 'Bekerja';
+  else if (labels.length === 1) title = labels[0];
+  else if (labels.length === 2) title = `${labels[0]} dan ${labels[1].toLowerCase()}`;
+  else title = `${labels[0]}, ${labels[1].toLowerCase()}, dan ${labels[2].toLowerCase()}`;
+  title += counts.size > 3 ? ', dll.' : '';
+  return title;
+}
+
+/** Tool yang hanya membaca: aman di-cache & tidak mengubah apa pun di komputer. */
+const READ_ONLY_TOOLS = new Set([
+  'file_list', 'file_stat', 'file_read', 'browser_text', 'browser_snapshot', 'browser_open',
+  'memory_search', 'skill_list', 'skill_read', 'session_log', 'screenshot',
+]);
+
+/**
+ * Normalisasi argumen supaya panggilan yang "mirip" terdeteksi sebagai duplikat.
+ * Contoh: C:\Foo\ vs c:\foo dan perbedaan "max" dianggap panggilan yang sama.
+ */
+function toolSignature(name: string, args: any): string {
+  const norm = (v: any): any => {
+    if (Array.isArray(v)) return v.map(norm);
+    if (v && typeof v === 'object') {
+      const out: any = {};
+      for (const k of Object.keys(v).sort()) {
+        if (k === 'max' || k === 'timeoutMs' || k === 'cwd' || k === 'limit') continue;
+        out[k] = norm(v[k]);
+      }
+      return out;
+    }
+    if (typeof v === 'string') return v.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+    return v;
+  };
+  try { return name + '|' + JSON.stringify(norm(args)); } catch { return name + '|' + String(args); }
+}
+
+function estimateMsgsChars(list: Msg[]): number {
+  let n = 0;
+  for (const m of list) {
+    if (typeof m.content === 'string') n += m.content.length;
+    else if (m.content) { try { n += JSON.stringify(m.content).length; } catch { /* ignore */ } }
+    if (m.tool_calls) { try { n += JSON.stringify(m.tool_calls).length; } catch { /* ignore */ } }
+  }
+  return n;
+}
+
+/**
+ * Auto-compaction (mirip DSH/OpenCode): kalau konteks membengkak, riwayat lama
+ * diringkas jadi satu catatan. Hanya memotong pada batas pesan user supaya
+ * pasangan tool_call <-> hasil tool tidak pernah terputus.
+ */
+function compactContext(list: Msg[], limitChars = 110000): { msgs: Msg[]; dropped: number } {
+  if (list.length < 30 || estimateMsgsChars(list) <= limitChars) return { msgs: list, dropped: 0 };
+  let cut = list.length - 24;
+  while (cut > 0 && list[cut]?.role !== 'user') cut--;
+  while (cut < list.length && (list[cut]?.role === 'tool' || (list[cut] as any)?.role === 'notice')) cut++;
+  if (cut <= 1) return { msgs: list, dropped: 0 };
+
+  const dropped = list.slice(0, cut);
+  const counts = new Map<string, number>();
+  const notes: string[] = [];
+  for (const m of dropped) {
+    if (m.role === 'tool' && m.name) counts.set(m.name, (counts.get(m.name) || 0) + 1);
+    if (m.role === 'assistant' && typeof m.content === 'string' && m.content.trim() && m.content !== '(memanggil tool)') {
+      const t = m.content.trim();
+      if (t.length > 40) notes.push(t.slice(0, 240));
+    }
+  }
+  const users = dropped
+    .filter((m) => m.role === 'user' && typeof m.content === 'string')
+    .map((m) => String(m.content).slice(0, 220));
+  const parts = ['[RINGKASAN RIWAYAT LAMA — dibuat otomatis karena konteks sudah panjang]'];
+  if (users.length) parts.push('Permintaan pengguna sebelumnya: ' + users.slice(-4).join(' | '));
+  if (counts.size) parts.push('Tool yang sudah dipanggil: ' + Array.from(counts.entries()).map(([n, c]) => `${n}×${c}`).join(', '));
+  if (notes.length) parts.push('Catatan dari langkah sebelumnya: ' + notes.slice(-4).join(' | '));
+  parts.push('Lanjutkan dari keadaan terakhir. JANGAN mengulang langkah yang sudah tercatat di ringkasan ini.');
+  return { msgs: [{ role: 'user', content: parts.join('\n') } as Msg, ...list.slice(cut)], dropped: cut };
+}
+
+/** Log pekerjaan sesi ini (dipakai tool session_log untuk laporan progres/error). */
+function buildSessionLog(list: Msg[]): any {
+  const counts = new Map<string, number>();
+  const errors: string[] = [];
+  const lines: string[] = [];
+  for (const m of list) {
+    if (m.role === 'notice') { lines.push(`! ${String(m.content).slice(0, 200)}`); continue; }
+    if (m.role === 'user') {
+      const t = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+      lines.push('USER: ' + t.replace(/\s+/g, ' ').slice(0, 240));
+      continue;
+    }
+    if (m.role === 'assistant') {
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) {
+          const n = tc.function?.name || '?';
+          counts.set(n, (counts.get(n) || 0) + 1);
+          lines.push(`  → ${n}(${String(tc.function?.arguments || '').replace(/\s+/g, ' ').slice(0, 120)})`);
+        }
+      } else if (typeof m.content === 'string' && m.content.trim()) {
+        lines.push('AI: ' + m.content.replace(/\s+/g, ' ').slice(0, 260));
+      }
+      continue;
+    }
+    if (m.role === 'tool') {
+      let r: any = m.content;
+      if (typeof r === 'string') { try { r = JSON.parse(r); } catch { /* biarkan */ } }
+      const err = r && typeof r === 'object' ? r.error : '';
+      if (err) errors.push(`${m.name}: ${String(err).slice(0, 160)}`);
+      const extra = r && typeof r === 'object'
+        ? (r.count !== undefined ? `count=${r.count}` : r.code !== undefined ? `code=${r.code}` : err ? `error=${String(err).slice(0, 80)}` : 'ok')
+        : 'ok';
+      lines.push(`  ← ${m.name} ${extra}`);
+    }
+  }
+  return {
+    ok: true,
+    total_events: lines.length,
+    tool_totals: Object.fromEntries(counts),
+    errors: errors.slice(-12),
+    log: lines.slice(-90),
+    note: 'Ini log internal sesi. Untuk laporan, ringkas dari log ini; jangan mengarang dan jangan membaca folder lain.',
+  };
+}
+
+/**
+ * Perkecil/normalisasi gambar tempelan (pola DSH: cap dimensi & ukuran file)
+ * supaya tidak ditolak provider vision dan tidak membengkakkan konteks.
+ */
+async function normalizeImageDataUrl(dataUrl: string, maxDim = 1600, maxBytes = 3_000_000): Promise<string> {
+  try {
+    if (!dataUrl.startsWith('data:image/')) return dataUrl;
+    const bytesOf = (u: string) => Math.floor((u.length - u.indexOf(',') - 1) * 0.75);
+    if (bytesOf(dataUrl) <= maxBytes) return dataUrl;
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = dataUrl;
+    });
+    let width = img.naturalWidth || 1280;
+    let height = img.naturalHeight || 720;
+    const scale = Math.min(1, maxDim / Math.max(width, height));
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const c2d = canvas.getContext('2d');
+      if (!c2d) return dataUrl;
+      c2d.drawImage(img, 0, 0, width, height);
+      const out = canvas.toDataURL('image/png');
+      if (bytesOf(out) <= maxBytes) return out;
+      width = Math.max(320, Math.round(width * 0.7));
+      height = Math.max(240, Math.round(height * 0.7));
+    }
+    return dataUrl;
+  } catch {
+    return dataUrl;
+  }
 }
 
 const ICON: Record<string, string> = {
@@ -287,6 +480,8 @@ export default function App() {
   const [urlInput, setUrlInput] = useState('');
 
   const abortRef = useRef(false);
+  const pasteGuardRef = useRef(0);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const pickFilesRef = useRef<() => Promise<void>>(async () => { /* diisi di bawah */ });
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const browserSlotRef = useRef<HTMLDivElement | null>(null);
@@ -497,40 +692,74 @@ export default function App() {
   pickFilesRef.current = () => pickFiles();
   const permission: Permission = settings.permission || (settings.accessMode === 'full' ? 'full' : 'workspace');
 
+  const addImageAttachment = useCallback(async (rawDataUrl: string, size?: number) => {
+    const dataUrl = await normalizeImageDataUrl(rawDataUrl);
+    const att: Attachment = {
+      kind: 'image',
+      name: `screenshot-${new Date().toISOString().slice(11, 19).replace(/:/g, '-')}.png`,
+      path: '(clipboard)',
+      dataUrl,
+      size: size || Math.floor((dataUrl.length - dataUrl.indexOf(',') - 1) * 0.75),
+    };
+    setAttachments((prev) => [...prev, att].slice(-10));
+    flash('Screenshot ditempel 🖼 — tekan Enter untuk mengirim.');
+  }, [flash]);
+
+  // Ambil gambar langsung dari clipboard sistem (dipakai Ctrl+V, menu +, dan
+  // listener global saat fokus tidak berada di kotak ketik).
+  const pasteSystemImage = useCallback(async (): Promise<boolean> => {
+    if (Date.now() - pasteGuardRef.current < 1200) return true; // sudah ditangani
+    if (!hostReady) return false;
+    try {
+      const res = await window.dsh.clipboard.image();
+      if (res?.ok && res.dataUrl) {
+        pasteGuardRef.current = Date.now();
+        await addImageAttachment(res.dataUrl);
+        return true;
+      }
+      if (res?.note) flash('Clipboard: ' + res.note);
+    } catch (err: any) {
+      flash('Gagal membaca clipboard: ' + (err?.message || String(err)));
+    }
+    return false;
+  }, [addImageAttachment, flash, hostReady]);
+
   async function handlePaste(e: React.ClipboardEvent) {
     const items = Array.from(e.clipboardData?.items || []);
     const imageItem = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'));
     if (imageItem) {
       e.preventDefault();
       const file = imageItem.getAsFile();
-      if (!file) return;
+      if (!file) { void pasteSystemImage(); return; }
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = String(reader.result || '');
-        const att: Attachment = {
-          kind: 'image',
-          name: `screenshot-${new Date().toISOString().slice(11, 19).replace(/:/g, '-')}.png`,
-          path: '(clipboard)',
-          dataUrl,
-          size: file.size,
-        };
-        setAttachments((prev) => [...prev, att].slice(-10));
-        flash('Screenshot dilampirkan. Kirim pesan untuk mengirim ke AI.');
+        pasteGuardRef.current = Date.now();
+        void addImageAttachment(String(reader.result || ''), file.size);
       };
       reader.readAsDataURL(file);
       return;
     }
-    // Fallback Windows: clipboard berisi gambar tanpa file item
-    if (!e.clipboardData?.getData('text')) {
-      const res = await window.dsh.clipboard.image();
-      if (res?.ok && res.dataUrl) {
-        e.preventDefault();
-        const att: Attachment = { kind: 'image', name: `screenshot-${Date.now()}.png`, path: '(clipboard)', dataUrl: res.dataUrl };
-        setAttachments((prev) => [...prev, att].slice(-10));
-        flash('Screenshot dari clipboard dilampirkan.');
-      }
+    // Windows sering menaruh screenshot tanpa item file: baca lewat clipboard sistem.
+    const text = e.clipboardData?.getData('text') || '';
+    if (!text) {
+      const ok = await pasteSystemImage();
+      if (ok) e.preventDefault();
     }
   }
+
+  // Ctrl+V saat fokus tidak di textarea (mis. baru klik panel aktivitas).
+  useEffect(() => {
+    function onDocPaste(ev: ClipboardEvent) {
+      const t = ev.target as HTMLElement | null;
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return; // ditangani komponen
+      const items = Array.from(ev.clipboardData?.items || []);
+      if (items.some((it) => it.kind === 'file' && it.type.startsWith('image/'))) return;
+      if ((ev.clipboardData?.getData('text') || '').length > 0) return;
+      void pasteSystemImage();
+    }
+    document.addEventListener('paste', onDocPaste);
+    return () => document.removeEventListener('paste', onDocPaste);
+  }, [pasteSystemImage]);
   async function pickFiles(mode?: 'image') {
     setMenuOpen(false);
     const res = await window.dsh.files.pick(mode);
@@ -653,7 +882,7 @@ export default function App() {
 
     let allowed = toolNamesFor(agentDef.tools);
     if (sessions.find((s) => s.id === sessionId)?.planMode) {
-      const SAFE = ['file_list', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read'];
+      const SAFE = ['file_list', 'file_stat', 'browser_open', 'browser_action', 'browser_text', 'browser_snapshot', 'browser_click', 'browser_fill', 'todo_write', 'memory_save', 'memory_search', 'skill_list', 'skill_read', 'session_log'];
       allowed = allowed.filter((n) => SAFE.includes(n));
     }
     const tools = TOOLS.filter((t: any) => allowed.includes(t.function.name));
@@ -698,8 +927,27 @@ export default function App() {
     };
 
     let blockedRepeats = 0;
+    // ---- state "engine" (setara DSH/OpenCode) ----
+    const toolCache = new Map<string, string>();   // hasil tool baca yang sudah pernah dijalankan
+    let exploreStreak = 0;      // panggilan baca berturut-turut tanpa aksi nyata
+    let forceFinal = false;     // paksa model menjawab dari data yang ada
+    let taskDone = false;       // model sudah memberi jawaban akhir
+    let compactNoticeShown = false;
+    let ctx: Msg[] = msgs;      // konteks yang dikirim ke model (bisa diringkas)
+    const addMsg = (m: Msg) => { msgs.push(m); if (ctx !== msgs) ctx.push(m); };
+
     while (!abortRef.current) {
       steps++;
+
+      // Auto-compaction: konteks terlalu panjang -> ringkas riwayat lama.
+      const comp = compactContext(ctx);
+      if (comp.dropped) {
+        ctx = comp.msgs;
+        if (!compactNoticeShown) {
+          compactNoticeShown = true;
+          appendMessage(sessionId, { role: 'notice', content: 'Riwayat lama diringkas otomatis supaya model tetap fokus (hemat konteks, gaya DSH).' });
+        }
+      }
 
       // Pengingat otomatis (tanpa terlihat pengguna): kalau rencana belum dibuat.
       if (isMultiStep && !todoSeen && planNudges < 3 && steps >= 2) {
@@ -708,15 +956,16 @@ export default function App() {
           '\n\n[PENGINGAT SISTEM] Kamu belum membuat daftar langkah untuk tugas ini. ' +
           'Panggil todo_write SEKARANG (3-6 langkah sederhana) sebelum memanggil tool lain.';
       }
+      const activeTools = forceFinal ? [] : tools;
       const payload = {
         provider: isAnthropic ? 'anthropic' : 'openai',
         baseUrl: settings.baseUrl,
         apiKey: settings.apiKey,
         model: settings.model,
         system: systemPrompt,
-        messages: messagesForApi(msgs),
-        tools: isAnthropic ? tools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters })) : tools,
-        tool_choice: isAnthropic ? undefined : 'auto',
+        messages: messagesForApi(ctx),
+        tools: isAnthropic ? activeTools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters })) : activeTools,
+        tool_choice: isAnthropic ? undefined : forceFinal ? 'none' : 'auto',
       };
 
       const resp = await callModel(payload);
@@ -729,8 +978,22 @@ export default function App() {
       const text: string = resp.text || '';
       const toolCalls = (resp.tool_calls || []).filter((tc: any) => allowedNames.includes(tc.function?.name));
 
+      // Sebagian provider mengabaikan tool_choice="none": kalau kita sudah
+      // memaksa jawaban, jangan lanjutkan loop — simpulkan dari log.
+      if (forceFinal && toolCalls.length) {
+        const log = buildSessionLog(msgs);
+        const totals = Object.entries(log.tool_totals || {}).map(([n, c]) => `${n}×${c}`).join(', ');
+        const summary = `Saya berhenti karena tidak ada kemajuan baru (${totals || 'tidak ada tool berhasil'}).` +
+          `${log.errors?.length ? '\nKendala: ' + log.errors.join('; ') : ''}` +
+          '\nCoba ulangi dengan instruksi lebih spesifik, atau ganti model di Settings.';
+        addMsg({ role: 'assistant', content: summary });
+        appendMessage(sessionId, { role: 'assistant', content: summary });
+        taskDone = true;
+        break;
+      }
+
       if (toolCalls.length) {
-        msgs.push({ role: 'assistant', content: text, tool_calls: toolCalls });
+        addMsg({ role: 'assistant', content: text, tool_calls: toolCalls });
         appendMessage(sessionId, { role: 'assistant', content: text || '(memanggil tool)', tool_calls: toolCalls });
 
         for (const tc of toolCalls) {
@@ -739,26 +1002,34 @@ export default function App() {
           let args: any = {};
           try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
 
-          // --- Pengaman loop: panggilan identik berulang ---
-          const sig = name + '|' + JSON.stringify(args);
+          // --- Pengaman loop: panggilan dengan argumen mirip dianggap duplikat ---
+          const sig = toolSignature(name, args);
           const seen = (sigCounts.get(sig) || 0) + 1;
           sigCounts.set(sig, seen);
 
           const pushToolResult = (payload: any) => {
             const s = JSON.stringify(payload).slice(0, 6000);
-            msgs.push({ role: 'tool', tool_call_id: tc.id, content: s, name });
+            addMsg({ role: 'tool', tool_call_id: tc.id, content: s, name });
             appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: s });
           };
 
-          if (seen >= 3) {
+          if (seen >= 2) {
             blockedRepeats++;
-            pushToolResult({
-              error: 'loop terdeteksi',
-              hint:
-                `Panggilan ${name} dengan argumen yang sama sudah ${seen}× tanpa hasil baru. ` +
-                'JANGAN ulangi. Ubah pendekatan (mis. pakai file_list/file_move atau exec dengan perintah berbeda), ' +
-                'atau jelaskan ke pengguna kendala yang dihadapi dan minta klarifikasi.',
-            });
+            exploreStreak++;
+            if (READ_ONLY_TOOLS.has(name) && toolCache.has(sig)) {
+              pushToolResult({
+                cached: true,
+                note: `Hasil ${name} dengan argumen ini SUDAH didapat sebelumnya. Tidak dijalankan ulang — pakai hasil di bawah.`,
+                result: (toolCache.get(sig) || '').slice(0, 1500),
+              });
+            } else {
+              pushToolResult({
+                error: 'panggilan berulang',
+                hint:
+                  `Panggilan ${name} dengan argumen yang sama sudah dilakukan ${seen}×. JANGAN ulangi. ` +
+                  'Ambil aksi berikutnya (file_move/file_write/exec) atau jawab pengguna dengan hasil yang sudah ada.',
+              });
+            }
             continue;
           }
 
@@ -784,10 +1055,16 @@ export default function App() {
 
           let result: any;
           try {
-            result = await runTool(name, args);
+            result = name === 'session_log'
+              ? buildSessionLog(msgs)
+              : await runTool(name, args);
           } catch (err: any) {
             result = { error: 'tool gagal: ' + (err?.message || String(err)) };
           }
+
+          // Pantau kemajuan: baca terus-menerus tanpa aksi = tanda berputar.
+          if (READ_ONLY_TOOLS.has(name)) exploreStreak++;
+          else exploreStreak = 0;
 
           if (name === 'todo_write') {
             todoSeen = true;
@@ -799,18 +1076,38 @@ export default function App() {
           const clean = { ...result };
           if (clean.dataUrl) clean.dataUrl = '(gambar terkirim terpisah)';
           const fullStr = JSON.stringify(clean);
-          // Token Saver (RTK): yang dikirim ke MODEL diringkas; UI tetap menyimpan versi penuh.
-          const modelStr = settings.tokenSaver?.rtk ? compressToolResult(name, clean, fullStr) : fullStr.slice(0, 6000);
+          // Yang dikirim ke MODEL selalu diringkas terstruktur; UI menyimpan versi penuh.
+          const modelStr = compressToolResult(name, clean, fullStr, settings.tokenSaver?.rtk !== false);
           const contentStr = fullStr.slice(0, 6000);
+          if (READ_ONLY_TOOLS.has(name) && !clean.error) toolCache.set(sig, modelStr);
 
-          msgs.push({ role: 'tool', tool_call_id: tc.id, content: modelStr, name });
+          addMsg({ role: 'tool', tool_call_id: tc.id, content: modelStr, name });
           appendMessage(sessionId, { role: 'tool', name, tool_call_id: tc.id, content: contentStr, image: image || undefined });
 
           if (image) {
-            msgs.push({ role: 'user', content: [{ type: 'image_url', image_url: { url: image } }] } as any);
+            addMsg({ role: 'user', content: [{ type: 'image_url', image_url: { url: image } }] } as any);
             appendMessage(sessionId, { role: 'user', content: '[gambar halaman]' });
           }
           if (name.startsWith('memory_') || name.startsWith('skill_')) void refreshMemory();
+        }
+
+        // --- Pengaman kemajuan (bukan batas langkah): hanya aktif kalau stuck ---
+        if (!forceFinal && exploreStreak >= 14) {
+          forceFinal = true;
+          hitLimit = true;
+          appendMessage(sessionId, {
+            role: 'notice',
+            content: 'OflaBot membaca banyak hal tanpa mengambil aksi, jadi saya minta ia menyimpulkan dari data yang sudah ada.',
+          });
+        } else if (!forceFinal && exploreStreak === 8) {
+          systemPrompt +=
+            '\n\n[PENGINGAT SISTEM] Kamu sudah membaca banyak data tanpa mengubah apa pun. ' +
+            'STOP membaca. Ambil aksi nyata sekarang (file_move/file_write/file_mkdir/exec) sesuai rencana, ' +
+            'atau jawab pengguna dengan temuan yang ada beserta kendalanya.';
+        } else if (!forceFinal && exploreStreak === 11) {
+          systemPrompt +=
+            '\n\n[PENGINGAT SISTEM TERAKHIR] Batas eksplorasi habis. JANGAN memanggil tool baca lagi. ' +
+            'Lakukan aksi atau jawab pengguna sekarang juga.';
         }
         continue;
       }
@@ -819,17 +1116,30 @@ export default function App() {
       if (!text.trim()) {
         appendMessage(sessionId, {
           role: 'notice',
-          content: 'Model tidak mengembalikan jawaban (respons kosong). Coba kirim ulang, atau ganti model/provider di Settings.',
+          content: forceFinal
+            ? 'Model berhenti tanpa kesimpulan. Berikut ringkasan pekerjaan yang sudah tercatat di log sesi.'
+            : 'Model tidak mengembalikan jawaban (respons kosong). Coba kirim ulang, atau ganti model/provider di Settings.',
         });
+        if (forceFinal) {
+          const log = buildSessionLog(msgs);
+          const totals = Object.entries(log.tool_totals || {}).map(([n, c]) => `${n}×${c}`).join(', ');
+          addMsg({ role: 'assistant', content: `Ringkasan otomatis: ${totals || 'tidak ada tool yang berhasil dijalankan'}.${log.errors?.length ? '\nError: ' + log.errors.join('; ') : ''}` });
+          appendMessage(sessionId, {
+            role: 'assistant',
+            content: `Ringkasan otomatis dari log: ${totals || 'tidak ada tool yang berhasil dijalankan'}.${log.errors?.length ? '\nError: ' + log.errors.join('; ') : ''}`,
+          });
+        }
         break;
       }
 
-      msgs.push({ role: 'assistant', content: text });
+      addMsg({ role: 'assistant', content: text });
       appendMessage(sessionId, { role: 'assistant', content: text });
+      taskDone = true;
       break;
     }
 
     if (hitLimit) setStepLimitHit(true);
+    void taskDone;
 
     setRunning(false);
     void refreshMemory();
@@ -939,12 +1249,12 @@ export default function App() {
           <span className="activity-chevron">{open ? '▾' : '▸'}</span>
           <span className="activity-icon">⚙</span>
           <span className="activity-title">{activitySummary(b.items)}</span>
-          <span className="activity-hint">{open ? 'sembunyikan' : 'detail'}</span>
+          <span className="activity-hint">{open ? 'sembunyikan' : `${b.items.length} langkah · detail`}</span>
         </button>
         {open && (
           <div className="activity-body">
             {b.text && <div className="activity-note">{b.text}</div>}
-            {b.items.map((it, idx) => (
+            {b.items.slice(0, 40).map((it, idx) => (
               <div key={idx} className="activity-item">
                 <div className="activity-item-head">
                   <span>{ICON[it.name || ''] || '•'}</span>
@@ -958,6 +1268,9 @@ export default function App() {
                 <pre className="activity-result mono">{pretty(it.result, 700)}</pre>
               </div>
             ))}
+            {b.items.length > 40 && (
+              <div className="activity-more">…dan {b.items.length - 40} pemanggilan lain (disembunyikan agar ringkas)</div>
+            )}
           </div>
         )}
       </div>
@@ -1141,6 +1454,10 @@ export default function App() {
                             <span className="pi-icon">📎</span><span className="pi-text">File</span>
                             <span className="pi-hint">lampirkan gambar / file</span>
                           </button>
+                          <button className="popmenu-item" onClick={() => { setMenuOpen(false); void pasteSystemImage(); }}>
+                            <span className="pi-icon">🖼</span><span className="pi-text">Tempel gambar</span>
+                            <span className="pi-hint">screenshot dari clipboard (Ctrl+V)</span>
+                          </button>
                           <button className="popmenu-item" onClick={() => { setMenuOpen(false); setGoalDraft(active?.goal || ''); setModal('goal'); }}>
                             <span className="pi-icon">🎯</span><span className="pi-text">Goal</span>
                             <span className="pi-hint">tujuan tugas panjang</span>
@@ -1217,9 +1534,11 @@ export default function App() {
                 </div>
 
                 <textarea
+                  ref={composerRef}
                   value={input}
-                  placeholder={`Perintah untuk ${agent.name}… (Enter kirim, Shift+Enter baris baru, ! perintah shell)`}
+                  placeholder={`Perintah untuk ${agent.name}… (Ctrl+V tempel screenshot, Enter kirim, Shift+Enter baris baru, ! perintah shell)`}
                   onChange={(e) => setInput(e.target.value)}
+                  onPaste={(e) => void handlePaste(e)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }}
                 />
               </div>

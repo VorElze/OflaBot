@@ -318,7 +318,10 @@ pre.mono { margin: 0; white-space: pre-wrap; }
 .activity-item-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #c3c9d6; flex-wrap: wrap; }
 .activity-item-head b { font-weight: 600; color: #9db4ff; }
 .activity-args { color: #6b7488; font-family: Consolas, monospace; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.activity-result { margin: 5px 0 0; background: #0b0d12; border: 1px solid #171c27; border-radius: 6px; padding: 7px 9px; color: #8f97a8; font-size: 10.8px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+.activity-result { margin: 5px 0 0; background: #0b0d12; border: 1px solid #171c27; border-radius: 6px; padding: 7px 9px; color: #8f97a8; font-size: 10.8px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text; }
+.activity-more { font-size: 11px; color: #6b7488; font-style: italic; padding-top: 4px; }
+/* Semua teks percakapan & hasil tool harus bisa diblok dan di-Ctrl+C. */
+.msg .content, .activity-title, .activity-args, .activity-note, .todo-item, .msg.user .content { -webkit-user-select: text; user-select: text; }
 .tag.warn { background: #2a2010; color: #ffca70; border: 1px solid #4a3a12; }
 
 /* ===== bubble assistant ===== */

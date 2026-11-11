@@ -167,13 +167,38 @@ kompaksi konteks, penanganan `tool-error`) dan perilaku agent GrokBot:
   provider yang selalu memanggil tool sama: berhenti di 3 panggilan, lanjut jawaban final.)
 - **Retry provider** otomatis 3× untuk error transien (429/5xx/timeout).
 - **Respons kosong** tidak lagi menjadi bubble "(tanpa jawaban)" — muncul notifikasi jelas.
-- **Batas langkah 26** + tombol **? Lanjutkan**.
+- **Tanpa batas langkah tetap** (v0.2.6+): agent berjalan sampai Anda klik Stop, model error,
+  atau pengaman kemajuan mendeteksi stuck (banyak baca tanpa aksi). Tidak ada tombol "Lanjutkan".
 - **Tool file native** (menggantikan pola shell loop): `file_list`, `file_move`,
   `file_mkdir`, `file_stat`.
-- **Todo/rencana tugas** (`todo_write`) tampil sebagai panel ?? — agent wajib memakainya
+- **Todo/rencana tugas** (`todo_write`) tampil sebagai panel 📋 — agent wajib memakainya
   untuk tugas multi-langkah.
 - **exec** kini punya `timeoutMs` (default 120s) dan `cwd`, output dipotong 200 KB
   dengan penanda `truncated`/`timedOut`.
+## 🧠 Engine agent (v0.2.7) — selaras DSH & OpenCode Desktop
+
+Hasil pembandingan langsung dengan kode DSH dan OpenCode Desktop (v2.2.7):
+
+- **Tool call dikelompokkan**: semua pemanggilan berurutan jadi **satu kartu** dengan judul
+  kategori gaya DSH/OpenCode — "Membaca file", "Membaca file dan menjalankan perintah",
+  bukan 12 baris "Used file_list". Jumlah langkah tampil kecil di kanan ("12 langkah · detail").
+- **Dedup + cache**: panggilan dengan argumen sama (dinormalisasi: path case/garis miring,
+  `max`, `cwd` diabaikan) **tidak dieksekusi ulang** — hasil sebelumnya dikembalikan dengan
+  penanda `cached`. Ini menghentikan loop yang dialami v0.2.6 (281× `file_list`).
+- **Pengaman kemajuan** (bukan batas langkah): kalau 8 panggilan baca berturut tanpa aksi,
+  model diingatkan; pada 11 diperingatkan keras; pada 14 tool dimatikan dan model wajib
+  menyimpulkan. Counter reset setiap kali ada aksi nyata (file_move/write/exec).
+- **Auto-compaction**: konteks > ~110 ribu karakter diringkas otomatis (ringkasan heuristik
+  riwayat lama, potong di batas pesan user agar pasangan tool-call tetap utuh).
+- **Pemangkasan output gaya DSH**: hasil tool dipotong tengah (head+tail + penanda
+  `[... N karakter tengah dipotong ...]`), daftar file diringkas ke sampel nama + hitungan.
+- **Tool `session_log`**: saat Anda minta laporan ("apa yang tadi dikerjakan / kenapa error"),
+  agent membaca log sesinya sendiri — bukan menebak atau membuka folder lain.
+- **Keyboard**: menu Edit (Cut/Copy/Paste/Select All) dipasang di main process supaya
+  Ctrl+C / Ctrl+V bekerja di seluruh kolom teks; menu bar disembunyikan.
+- **Ctrl+V gambar**: handler `onPaste` + listener global + fallback IPC clipboard
+  (`clipboard.read()` ClipboardItem → PNG). Gambar dinormalisasi (≤1600px / ≤3 MB)
+  sebelum dikirim ke model vision.
 ## ➕ Menu composer (v0.2.5)
 
 Tombol **＋** di kotak pesan (mirip DSH):
@@ -181,6 +206,7 @@ Tombol **＋** di kotak pesan (mirip DSH):
 | Add | Fungsi |
 |---|---|
 | 📎 File (Ctrl+U) | lampirkan gambar (vision) atau file teks (konteks) |
+| 🖼 Tempel gambar | ambil screenshot dari clipboard (sama seperti Ctrl+V) |
 | 🎯 Goal | tujuan jangka panjang sesi (banner, selalu diingat model) |
 | 🗒 Plan | mode rencana: hanya menyusun langkah, tidak mengubah apa pun |
 | 💬 Feedback | rating ★ + catatan, tersimpan lokal |
@@ -205,4 +231,5 @@ Menu sidebar **⚡ Token Saver** — fitur hemat token yang bisa dinyalakan/dima
 ## Tempel screenshot
 
 Tekan **Ctrl+V** di kotak pesan untuk melampirkan screenshot dari clipboard
-(Win+Shift+S → Ctrl+V). Bisa juga **Ctrl+U** atau **＋ → File**.
+(Win+Shift+S → Ctrl+V). Bisa juga **＋ → Tempel gambar**, **Ctrl+U**, atau **＋ → File**.
+Gambar otomatis diperkecil bila terlalu besar (maks 1600 px / 3 MB).

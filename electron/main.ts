@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, ipcMain, desktopCapturer, dialog, protocol, net, shell } from 'electron';
+import { app, BrowserWindow, WebContentsView, ipcMain, desktopCapturer, dialog, protocol, net, shell, Menu, clipboard, nativeImage } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -113,6 +113,35 @@ function registerAppProtocol() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Menu aplikasi: mendaftarkan role Edit (cut/copy/paste/select all).
+// Tanpa menu ini, sebagian mesin Windows tidak meneruskan Ctrl+C / Ctrl+V ke
+// kolom teks Electron. Menu bar sendiri disembunyikan agar tampilan tetap bersih;
+// akseleratornya tetap aktif.
+// ---------------------------------------------------------------------------
+function installEditMenu() {
+  const template: any[] = [
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        { role: 'pasteAndMatchStyle' }, { role: 'delete' }, { type: 'separator' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280, height: 820,
@@ -130,7 +159,10 @@ function createWindow() {
 
 app.whenReady().then(() => {
   registerAppProtocol();
+  installEditMenu();
   createWindow();
+  // Menu bar disembunyikan: tetap ada (akselerator Ctrl+C/V hidup), tak makan tempat.
+  try { win?.setMenuBarVisibility(false); } catch { /* abaikan */ }
 
   // Smoke test hook: GROKBOT_SMOKE=<png path> renders once, writes a screenshot, then exits.
   if ((process.env.OFLABOT_SMOKE || process.env.GROKBOT_SMOKE)) {
@@ -318,6 +350,98 @@ app.whenReady().then(() => {
             };
           })()`);
           console.log('LOOP_TEST ' + JSON.stringify(loopInfo));
+        }
+
+        // Uji Ctrl+V gambar: taruh PNG di clipboard OS, paste lewat webContents.paste().
+        if (process.env.OFLABOT_SMOKE_PASTE) {
+          try {
+            const pngPath = process.env.OFLABOT_SMOKE_PASTE_IMAGE || path.join(__dirname, '..', 'docs', 'screenshot-chat.png');
+            const img = nativeImage.createFromPath(pngPath);
+            const ClipItem: any = (require('electron') as any).ClipboardItem;
+            if (ClipItem && (clipboard as any).write) {
+              const pngBuf = img.toPNG();
+              const blob = new Blob([new Uint8Array(pngBuf)], { type: 'image/png' });
+              await (clipboard as any).write([new ClipItem({ 'image/png': blob })]);
+            } else {
+              (clipboard as any).writeImage(img);
+            }
+            await win!.webContents.executeJavaScript(`(() => { const t = document.querySelector('.composer textarea'); t && t.focus(); return true; })()`);
+            await new Promise((r) => setTimeout(r, 400));
+            win!.webContents.paste();
+            await new Promise((r) => setTimeout(r, 1500));
+            const pasteUi = await win!.webContents.executeJavaScript(`(() => ({
+              chips: document.querySelectorAll('.attach-row .attach-chip').length,
+              imageChips: document.querySelectorAll('.attach-chip.image').length,
+              chipText: Array.from(document.querySelectorAll('.attach-chip')).map((n) => n.textContent),
+              menuExists: !!document.querySelector('.popmenu'),
+            }))()`);
+            const clipIpc = await win!.webContents.executeJavaScript(`window.dsh.clipboard.image().then((r) => ({ ok: !!r.ok, len: (r.dataUrl || '').length, note: r.note || '' })).catch((e) => ({ ok: false, note: String(e) }))`);
+            const menuInfo = { hasMenu: !!Menu.getApplicationMenu(), editItems: (Menu.getApplicationMenu()?.items || []).find((i) => i.label === 'Edit')?.submenu?.items.length || 0 };
+            console.log('PASTE_TEST ' + JSON.stringify({ ...pasteUi, clipIpc, menuInfo, srcImage: !img.isEmpty() }));
+          } catch (e: any) {
+            console.log('PASTE_FAIL ' + (e?.message || String(e)));
+          }
+        }
+
+        // Uji engine: grouping tool call + cache + pengaman kemajuan (pakai mock provider).
+        if (process.env.OFLABOT_SMOKE_ENGINE) {
+          const modelName = process.env.OFLABOT_SMOKE_ENGINE_MODEL || 'mock-many';
+          const seedMsgs = modelName.includes('report')
+            ? [
+                { role: 'user', content: 'rapikan file di disk C lalu pindahkan ke D sesuai jenis file', ts: Date.now() - 60000 },
+                { role: 'assistant', content: '(memanggil tool)', tool_calls: [{ id: 'call_seed_1', type: 'function', function: { name: 'file_list', arguments: '{"dir":"C:\\\\Users\\\\msyam\\\\Downloads"}' } }], ts: Date.now() - 59000 },
+                { role: 'tool', name: 'file_list', tool_call_id: 'call_seed_1', content: '{"ok":true,"count":3,"entries":[{"name":"a.pdf","dir":false}]}', ts: Date.now() - 58000 },
+                { role: 'assistant', content: 'Sebagian file gagal dipindahkan karena folder tujuan belum ada.', ts: Date.now() - 57000 },
+              ]
+            : [];
+          await win!.webContents.executeJavaScript(`(() => {
+            const settings = { provider: 'custom', baseUrl: 'http://127.0.0.1:18999', apiKey: 'mock', model: ${JSON.stringify(modelName)}, autoLearn: false, accessMode: 'full', permission: 'full', tokenSaver: { rtk: true, caveman: false, ponytail: false } };
+            localStorage.setItem('oflabot.settings.v1', JSON.stringify(settings));
+            localStorage.setItem('oflabot.sessions.v1', JSON.stringify([{ id: 'engine-test', title: 'engine test', agentId: 'oflabot', messages: ${JSON.stringify(seedMsgs)}, createdAt: Date.now(), updatedAt: Date.now() }]));
+            localStorage.setItem('oflabot.active-session.v1', 'engine-test');
+            return true;
+          })()`);
+          await win!.webContents.reload();
+          await new Promise((r) => setTimeout(r, 2500));
+          const enginePrompt = modelName.includes('report')
+            ? 'berikan saya laporan dari log pekerjaan tadi, apa yang berhasil dan apa yang error'
+            : 'rapikan file di disk C lalu pindahkan ke D sesuai jenis file';
+          await win!.webContents.executeJavaScript(`(() => {
+            const ta = document.querySelector('.composer textarea');
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            setter.call(ta, ${JSON.stringify(enginePrompt)});
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('.composer-actions .btn.primary').click();
+            return true;
+          })()`);
+          await new Promise((r) => setTimeout(r, Number(process.env.OFLABOT_SMOKE_ENGINE_WAIT || 22000)));
+          const engineInfo = await win!.webContents.executeJavaScript(`(() => {
+            const raw = JSON.parse(localStorage.getItem('oflabot.sessions.v1') || '[]');
+            const msgs = (raw[0] || {}).messages || [];
+            const toolMsgs = msgs.filter((m) => m.role === 'tool');
+            const activities = Array.from(document.querySelectorAll('.activity'));
+            const assistant = msgs.filter((m) => m.role === 'assistant' && !(m.tool_calls || []).length);
+            return {
+              msgs: msgs.length,
+              tools: toolMsgs.length,
+              cached: toolMsgs.filter((m) => String(m.content || '').includes('"cached":true')).length,
+              repeated: toolMsgs.filter((m) => String(m.content || '').includes('panggilan berulang')).length,
+              activityCards: activities.length,
+              activityTitles: activities.map((n) => (n.querySelector('.activity-title') || {}).textContent || '').slice(0, 6),
+              activityHints: activities.map((n) => (n.querySelector('.activity-hint') || {}).textContent || '').slice(0, 3),
+              lastAssistant: String((assistant[assistant.length - 1] || {}).content || '').slice(0, 200),
+              notices: msgs.filter((m) => m.role === 'notice').map((m) => String(m.content)).slice(-4),
+              todoCard: !!document.querySelector('.todo-card'),
+              targets: document.querySelectorAll('.attach-row .attach-chip').length,
+              sessionLogTools: toolMsgs.filter((m) => String(m.content || '').includes('total_events')).length,
+              sessionLogPreview: String((toolMsgs.find((m) => String(m.content || '').includes('total_events')) || {}).content || '').slice(0, 360),
+            };
+          })()`);
+          console.log('ENGINE_TEST ' + JSON.stringify(engineInfo));
+          try {
+            const stateRes = await net.fetch('http://127.0.0.1:18999/state');
+            console.log('ENGINE_STATE ' + JSON.stringify(await stateRes.json()));
+          } catch { /* mock tidak jalan */ }
         }
 
         const img = await win!.webContents.capturePage();
@@ -967,13 +1091,44 @@ ipcMain.handle('dialog:pickFiles', async (_e, mode?: string) => {
 
 // ===========================================================================
 // Clipboard: tempel gambar (screenshot) ke chat.
+// Urutan: Electron clipboard (instan) -> fallback .NET (STA) untuk mesin yang
+// clipboard-nya hanya terbaca lewat WinForms.
 // ===========================================================================
+function clipboardImageElectron(): Promise<{ ok: boolean; dataUrl?: string; note?: string }> {
+  // Electron 44+: API async clipboard (ClipboardItem / Blob).
+  return (async () => {
+    try {
+      const items: any[] = await (clipboard as any).read?.();
+      for (const item of items || []) {
+        const types: string[] = Array.isArray(item?.types) ? item.types : [];
+        const imgType = types.find((t) => typeof t === 'string' && t.startsWith('image/'));
+        if (!imgType) continue;
+        const blob: any = await item.getType(imgType);
+        const buf: Buffer = Buffer.from(await blob.arrayBuffer());
+        if (buf.length > 100) return { ok: true, dataUrl: `data:${imgType};base64,` + buf.toString('base64') };
+      }
+      if (items && items.length) return { ok: false, note: 'clipboard tidak berisi gambar' };
+    } catch { /* lanjut ke API lama */ }
 
-// ===========================================================================
-// Clipboard: tempel gambar (screenshot) ke chat.
-// ===========================================================================
-ipcMain.handle('clipboard:image', async () => {
-  // Windows: ambil gambar dari clipboard lewat .NET (STA), simpan PNG sementara.
+    // Electron lama: API sinkron readImage/availableFormats.
+    try {
+      const img = (clipboard as any).readImage?.();
+      if (img && typeof img.isEmpty === 'function' && !img.isEmpty() && typeof img.toPNG === 'function') {
+        const buf: Buffer = img.toPNG();
+        if (buf && buf.length > 100) return { ok: true, dataUrl: 'data:image/png;base64,' + buf.toString('base64') };
+      }
+      const fmts = typeof (clipboard as any).availableFormats === 'function' ? (clipboard as any).availableFormats() : [];
+      if (Array.isArray(fmts) && fmts.some((f: string) => /image/i.test(f))) {
+        return { ok: false, note: 'clipboard berisi gambar yang tidak bisa dibaca langsung' };
+      }
+    } catch (err: any) {
+      return { ok: false, note: err?.message || String(err) };
+    }
+    return { ok: false, note: 'clipboard tidak berisi gambar' };
+  })();
+}
+
+function clipboardImageDotNet(): Promise<any> {
   return new Promise((resolve) => {
     const ps = [
       'Add-Type -AssemblyName System.Windows.Forms',
@@ -1001,6 +1156,14 @@ ipcMain.handle('clipboard:image', async () => {
       }
     });
   });
+}
+
+ipcMain.handle('clipboard:image', async () => {
+  const first = await clipboardImageElectron();
+  if (first.ok) return first;
+  const second = await clipboardImageDotNet();
+  if (second?.ok) return second;
+  return { ok: false, note: first.note || second?.note || 'clipboard kosong' };
 });
 
 // ===========================================================================

@@ -87,6 +87,15 @@ export const TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'session_log',
+      description:
+        'Baca log pekerjaan sesi ini (perintah pengguna, tool yang sudah dipanggil, hasil/error-nya). WAJIB dipakai jika pengguna minta laporan progres, "apa yang tadi dikerjakan", atau "kenapa error". Jangan menebak dan jangan membaca folder lain untuk laporan.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'file_list',
       description: 'Daftar file/folder (rekursif maks 3 level) tanpa shell. Lebih aman & cepat daripada exec dir. pattern: filter nama, mis. "*.png".',
       parameters: { type: 'object', properties: { dir: { type: 'string' }, pattern: { type: 'string' }, max: { type: 'number' } }, required: ['dir'] },
@@ -264,7 +273,7 @@ export const BROWSER_TOOL_NAMES = [
   'browser_fill',
 ];
 
-export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'todo_write', 'file_list', 'file_stat'];
+export const MEMORY_TOOL_NAMES = ['memory_save', 'memory_search', 'memory_delete', 'skill_list', 'skill_read', 'session_log', 'todo_write', 'file_list', 'file_stat'];
 
 export async function runTool(name: string, args: any): Promise<any> {
   const b = window.dsh.browser;
@@ -285,6 +294,8 @@ export async function runTool(name: string, args: any): Promise<any> {
       return sk.read(args.slug);
     case 'todo_write':
       return { ok: true, todos: Array.isArray(args.todos) ? args.todos : [] };
+    case 'session_log':
+      return { ok: true, note: 'log sesi dibaca di renderer' };
     case 'file_list':
       return window.dsh.fs.list(args.dir, { pattern: args.pattern, max: args.max });
     case 'file_move':
@@ -292,7 +303,8 @@ export async function runTool(name: string, args: any): Promise<any> {
     case 'file_mkdir':
       return window.dsh.fs.mkdir(args.dir);
     case 'file_stat':
-      return window.dsh.fs.read(args.path, args.maxBytes);    case 'browser_open': return b.tool('open', { url: args.url });
+      return window.dsh.fs.read(args.path, args.maxBytes);
+    case 'browser_open': return b.tool('open', { url: args.url });
     case 'browser_action': return b.tool(args.action);
     case 'browser_snapshot': return b.tool('snapshot');
     case 'browser_text': return b.tool('text');
