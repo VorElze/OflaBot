@@ -587,6 +587,154 @@ app.whenReady().then(() => {
           } catch { /* mock tidak jalan */ }
         }
 
+        // ===== Dokumentasi: screenshot UI terkini untuk README repo =====
+        if (process.env.OFLABOT_SMOKE_DOCS) {
+          try {
+            const docsDir = path.join(__dirname, '..', 'docs');
+            await fsProm.mkdir(lp(docsDir), { recursive: true });
+            const demoMessages = [
+              {
+                role: 'user', ts: Date.now() - 120000,
+                content: 'Rapikan folder Downloads: PDF ke D:\\Dokumen\\PDF, gambar ke D:\\Gambar, sisanya ke D:\\Lain. Jangan sentuh folder sistem.',
+              },
+              {
+                role: 'assistant', content: '', ts: Date.now() - 110000,
+                tool_calls: [
+                  { id: 'd1', type: 'function', function: { name: 'todo_write', arguments: JSON.stringify({ todos: [
+                    { content: 'Lihat isi folder Downloads', status: 'completed' },
+                    { content: 'Kelompokkan file per jenis', status: 'completed' },
+                    { content: 'Pindahkan PDF ke D:\\Dokumen\\PDF', status: 'completed' },
+                    { content: 'Pindahkan gambar ke D:\\Gambar', status: 'in_progress' },
+                    { content: 'Verifikasi hasil & laporkan', status: 'pending' },
+                  ] }) } },
+                  { id: 'd2', type: 'function', function: { name: 'file_list', arguments: JSON.stringify({ dir: 'C:\\Users\\msyam\\Downloads' }) } },
+                  { id: 'd3', type: 'function', function: { name: 'file_move', arguments: JSON.stringify({ src: 'C:\\Users\\msyam\\Downloads\\Laporan-Keuangan.pdf', dest: 'D:\\Dokumen\\PDF\\Laporan-Keuangan.pdf' }) } },
+                  { id: 'd4', type: 'function', function: { name: 'file_move', arguments: JSON.stringify({ src: 'C:\\Users\\msyam\\Downloads\\Screenshot-2026.png', dest: 'D:\\Gambar\\Screenshot-2026.png' }) } },
+                  { id: 'd5', type: 'function', function: { name: 'file_search', arguments: JSON.stringify({ dir: 'D:\\Dokumen', query: 'laporan' }) } },
+                ],
+              },
+              { role: 'tool', name: 'todo_write', tool_call_id: 'd1', ts: Date.now() - 109000, content: JSON.stringify({ ok: true, todos: [
+                { content: 'Lihat isi folder Downloads', status: 'completed' },
+                { content: 'Kelompokkan file per jenis', status: 'completed' },
+                { content: 'Pindahkan PDF ke D:\\Dokumen\\PDF', status: 'completed' },
+                { content: 'Pindahkan gambar ke D:\\Gambar', status: 'in_progress' },
+                { content: 'Verifikasi hasil & laporkan', status: 'pending' },
+              ] }) },
+              { role: 'tool', name: 'file_list', tool_call_id: 'd2', ts: Date.now() - 108000, content: JSON.stringify({ ok: true, base: 'C:\\Users\\msyam\\Downloads', count: 3, truncated: false, entries: [
+                { path: 'C:\\Users\\msyam\\Downloads\\Laporan-Keuangan.pdf', name: 'Laporan-Keuangan.pdf', dir: false, size: 245120 },
+                { path: 'C:\\Users\\msyam\\Downloads\\Screenshot-2026.png', name: 'Screenshot-2026.png', dir: false, size: 812340 },
+                { path: 'C:\\Users\\msyam\\Downloads\\catatan.txt', name: 'catatan.txt', dir: false, size: 1240 },
+              ] }) },
+              { role: 'tool', name: 'file_move', tool_call_id: 'd3', ts: Date.now() - 107000, content: JSON.stringify({ ok: true, from: 'C:\\Users\\msyam\\Downloads\\Laporan-Keuangan.pdf', to: 'D:\\Dokumen\\PDF\\Laporan-Keuangan.pdf', method: 'copy+delete', verified: true }) },
+              { role: 'tool', name: 'file_move', tool_call_id: 'd4', ts: Date.now() - 106000, content: JSON.stringify({ ok: true, from: 'C:\\Users\\msyam\\Downloads\\Screenshot-2026.png', to: 'D:\\Gambar\\Screenshot-2026.png', method: 'copy+delete', verified: true }) },
+              { role: 'tool', name: 'file_search', tool_call_id: 'd5', ts: Date.now() - 105000, content: JSON.stringify({ ok: true, base: 'D:\\Dokumen', query: 'laporan', count: 1, matches: [{ path: 'D:\\Dokumen\\PDF\\Laporan-Keuangan.pdf', line: 1, text: 'Laporan Keuangan' }] }) },
+              { role: 'assistant', ts: Date.now() - 90000, content: 'Selesai. 2 file dipindahkan dan diverifikasi ukurannya (metode copy+delete antar-drive).\n\n**Hasil**\n- `Laporan-Keuangan.pdf` → `D:\\Dokumen\\PDF\\`\n- `Screenshot-2026.png` → `D:\\Gambar\\`\n- `catatan.txt` → menunggu konfirmasi Anda (sisa ke `D:\\Lain`)\n\nMau saya lanjutkan memindahkan sisanya?' },
+            ];
+            const demoSession = { id: 'docs-demo', title: 'Rapikan Downloads ke D:', agentId: 'oflabot', messages: demoMessages, createdAt: Date.now() - 180000, updatedAt: Date.now(), goal: 'Merapikan file Downloads ke folder D:\\ per jenis file' };
+            const docsSettings = { provider: '9router', baseUrl: '', apiKey: '', model: 'free-coding', autoLearn: true, accessMode: 'full', permission: 'full', tokenSaver: { rtk: true, caveman: true, ponytail: true }, rules: [
+              { id: 'r1', tool: '*', pattern: 'C:\\Windows*', action: 'deny' },
+              { id: 'r2', tool: '*', pattern: '*Program Files*', action: 'deny' },
+              { id: 'r3', tool: 'file_move', pattern: 'D:\\*', action: 'allow' },
+              { id: 'r4', tool: 'file_delete', pattern: '*', action: 'ask' },
+              { id: 'r5', tool: 'exec', pattern: '*format*', action: 'ask' },
+            ], webSearch: { provider: 'bing', apiKey: '', baseUrl: '' } };
+            await win!.webContents.executeJavaScript(`(() => {
+              localStorage.setItem('oflabot.settings.v1', ${JSON.stringify(JSON.stringify(docsSettings))});
+              localStorage.setItem('oflabot.sessions.v1', ${JSON.stringify(JSON.stringify([demoSession]))});
+              localStorage.setItem('oflabot.active-session.v1', 'docs-demo');
+              localStorage.setItem('oflabot.browser.open', '0');
+              return true;
+            })()`);
+            await win!.webContents.reload();
+            await new Promise((r) => setTimeout(r, 3000));
+            try { win!.show(); win!.focus(); } catch { /* ignore */ }
+            await new Promise((r) => setTimeout(r, 800));
+            console.log('DOCS_STEP ready');
+            const shot = async (name: string) => {
+              for (let attempt = 0; attempt < 4; attempt++) {
+                try {
+                  const image = await win!.webContents.capturePage();
+                  fs.writeFileSync(path.join(docsDir, name), image.toPNG());
+                  console.log('DOC_SHOT ' + name);
+                  return;
+                } catch (e: any) {
+                  console.log('DOC_SHOT_RETRY ' + name + ' #' + (attempt + 1) + ' ' + (e?.message || String(e)));
+                  await new Promise((r) => setTimeout(r, 800));
+                }
+              }
+              throw new Error('capture gagal: ' + name);
+            };
+            const clickText = async (selector: string, text: string) => {
+              await win!.webContents.executeJavaScript(`(() => {
+                const el = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find((n) => (n.innerText || '').includes(${JSON.stringify(text)}));
+                if (el) el.click();
+                return !!el;
+              })()`);
+              await new Promise((r) => setTimeout(r, 700));
+            };
+            // 1) Chat utama
+            await shot('screenshot-chat.png');
+            // 2) Detail aktivitas (expand kartu tool)
+            await win!.webContents.executeJavaScript(`(() => { const h = document.querySelector('.activity-head'); if (h) h.click(); return true; })()`);
+            await new Promise((r) => setTimeout(r, 600));
+            await shot('screenshot-activity.png');
+            // 3) Panel izin
+            await clickText('.side-btn', 'Izin');
+            await shot('screenshot-permissions.png');
+            await win!.webContents.executeJavaScript(`document.querySelector('.modal-head .btn.icon')?.click()`);
+            await new Promise((r) => setTimeout(r, 500));
+            // 4) Panel token saver
+            await clickText('.side-btn', 'Token Saver');
+            await shot('screenshot-tokensaver.png');
+            await win!.webContents.executeJavaScript(`document.querySelector('.modal-head .btn.icon')?.click()`);
+            await new Promise((r) => setTimeout(r, 500));
+            // 5) Panel settings (web search)
+            await clickText('.side-btn', 'Settings');
+            await shot('screenshot-settings.png');
+            await win!.webContents.executeJavaScript(`document.querySelector('.modal-head .btn.icon')?.click()`);
+            await new Promise((r) => setTimeout(r, 500));
+            // 6) Browser tertanam: simpan potongan (window + isi halaman + posisi) untuk digabung.
+            await win!.webContents.executeJavaScript(`(() => {
+              const open = document.querySelector('.activity.open .activity-head');
+              if (open) open.click();
+              return true;
+            })()`);
+            await new Promise((r) => setTimeout(r, 500));
+            await win!.webContents.executeJavaScript(`document.querySelectorAll('.tab')[1]?.click()`);
+            openInEmbeddedBrowser('https://example.com');
+            await new Promise((r) => setTimeout(r, 5000));
+            try {
+              const rect = await win!.webContents.executeJavaScript(`(() => {
+                const el = document.querySelector('.browser-slot');
+                const r = el ? el.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+                return { x: r.x, y: r.y, w: r.width, h: r.height, iw: window.innerWidth, ih: window.innerHeight };
+              })()`);
+              const tmpDir = path.join(process.cwd(), '.tools', 'docs-browser');
+              await fsProm.mkdir(lp(tmpDir), { recursive: true });
+              const winImg = await win!.webContents.capturePage();
+              fs.writeFileSync(path.join(tmpDir, 'win.png'), winImg.toPNG());
+              let pageImg = null;
+              try { pageImg = await browserView!.webContents.capturePage(); } catch (e: any) { console.log('DOC_PAGE_ERR ' + (e?.message || String(e))); }
+              if (pageImg && !pageImg.isEmpty()) fs.writeFileSync(path.join(tmpDir, 'page.png'), pageImg.toPNG());
+              if (!pageImg || pageImg.isEmpty()) {
+                const dataUrl = await win!.webContents.executeJavaScript(`window.dsh.browser.tool('snapshot').then((r) => r && r.dataUrl || '')`);
+                if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/png;base64,')) {
+                  fs.writeFileSync(path.join(tmpDir, 'page.png'), Buffer.from(dataUrl.split(',')[1], 'base64'));
+                  console.log('DOC_PAGE_SNAPSHOT ok');
+                } else {
+                  console.log('DOC_PAGE_SNAPSHOT empty');
+                }
+              }
+              fs.writeFileSync(path.join(tmpDir, 'rect.json'), JSON.stringify(rect), 'utf8');
+              console.log('DOC_BROWSER_PARTS ' + tmpDir + ' ' + JSON.stringify(rect));
+            } catch (e: any) {
+              console.log('DOC_BROWSER_FAIL ' + (e?.message || String(e)));
+            }
+          } catch (e: any) {
+            console.log('DOCS_FAIL ' + (e?.message || String(e)));
+          }
+        }
+
         const img = await win!.webContents.capturePage();
         require('fs').writeFileSync(out, img.toPNG());
         // Gagal tangkap child view? kirim juga info state browser.
